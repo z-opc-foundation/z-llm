@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.yuku123</groupId>
+        <artifactId>z-llm</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <groupId>io.github.yuku123</groupId>
+    <artifactId>z-llm-starter</artifactId>
+    <version>${revision}</version>
+    <packaging>jar</packaging>
+
+    <name>z-llm-starter (Auto-Configuration)</name>
+    <description>Spring Boot Starter — auto-configuration + properties binding + 注册 ChatGatewayService / controllers</description>
+
+    <properties>
+        <maven.compiler.source>8</maven.compiler.source>
+        <maven.compiler.target>8</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <url>https://github.com/z-opc-foundation/z-llm</url>
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <id>yuku123</id>
+            <name>yuku123</name>
+            <email>1340947819@qq.com</email>
+            <organization>z-team</organization>
+            <organizationUrl>https://github.com/yuku123</organizationUrl>
+            <timezone>+08:00</timezone>
+            <roles>
+                <role>owner</role>
+            </roles>
+        </developer>
+    </developers>
+    <scm>
+        <connection>scm:git:https://github.com/z-opc-foundation/z-llm.git</connection>
+        <developerConnection>scm:ssh:git@github.com/z-opc-foundation/z-llm.git</developerConnection>
+        <url>https://github.com/z-opc-foundation/z-llm</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-llm-api</artifactId>
+            <version>${revision}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-llm-core</artifactId>
+            <version>${revision}</version>
+        </dependency>
+
+        <!-- Spring Boot Auto-Configuration -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-autoconfigure</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- starter 自身注册用 spring-web -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
+        </dependency>
+    </dependencies>
+</project>

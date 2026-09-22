@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        z-llm: LLM 网关 (中心化平台). 4 子模块.
+        - z-llm-api     公共 DTO (UnifiedRequest/Response, ApiKey, LlmCredential 等)
+        - z-llm-core    HTTP 网关 + OpenAI/Anthropic 双协议适配 + AK 保管 + 限流 + 计量 + Provider 注册
+        - z-llm-starter Spring Boot Starter (auto-configuration + properties binding)
+        - z-llm-admin   管理面 (provider / model / health / config)
+        依赖 z-agent-kernel-llm + z-agent-kernel-message + z-agent-kernel-types, 不重复实现 provider 调用.
+        暴露 OpenAI / Anthropic 标准协议, 持有各家 provider AK 并分发.
+        发版模式: reversion (CI-friendly versions) + flatten-maven-plugin, 跟 z-boot 同源.
+    -->
+    <groupId>io.github.yuku123</groupId>
+    <artifactId>z-llm</artifactId>
+    <version>${revision}</version>
+    <packaging>pom</packaging>
+
+    <name>z-llm (LLM Gateway)</name>
+    <description>中心化 LLM 网关, 暴露 OpenAI/Anthropic 标准协议, 后端 6 vendor provider 通过 z-agent-kernel-llm 调用</description>
+    <url>https://github.com/z-opc-foundation/z-llm</url>
+
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <id>yuku123</id>
+            <name>yuku123</name>
+            <email>1340947819@qq.com</email>
+            <organization>z-team</organization>
+            <organizationUrl>https://github.com/yuku123</organizationUrl>
+            <timezone>+08:00</timezone>
+            <roles>
+                <role>owner</role>
+            </roles>
+        </developer>
+    </developers>
+    <scm>
+        <connection>scm:git:https://github.com/z-opc-foundation/z-llm.git</connection>
+        <developerConnection>scm:ssh://git@github.com/z-opc-foundation/z-llm.git</developerConnection>
+        <url>https://github.com/z-opc-foundation/z-llm</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <modules>
+        <module>z-llm-api</module>
+        <module>z-llm-core</module>
+        <module>z-llm-starter</module>
+        <module>z-llm-admin</module>
+    </modules>
+
+    <properties>
+        <!-- 项目自身版本 -->
+        <revision>0.1.0</revision>
+
+        <!-- JDK / 编译 -->
+        <maven.compiler.source>8</maven.compiler.source>
+        <maven.compiler.target>8</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- 框架版本 -->
+        <spring-boot.version>2.7.18</spring-boot.version>
+        <spring-cloud.version>2021.0.8</spring-cloud.version>
+
+        <!-- z 系列生态 -->
+        <z-agent-kernel.version>0.1.0</z-agent-kernel.version>
+        <z-config.version>1.0.1</z-config.version>
+        <z-ctc.version>1.0.1</z-ctc.version>
+        <z-mist.version>1.0.0</z-mist.version>
+
+        <!-- Maven 插件版本 -->
+        <maven-deploy-plugin.version>3.1.4</maven-deploy-plugin.version>
+        <maven-source-plugin.version>3.3.0</maven-source-plugin.version>
+        <maven-javadoc-plugin.version>3.11.2</maven-javadoc-plugin.version>
+        <maven-gpg-plugin.version>3.2.7</maven-gpg-plugin.version>
+        <central-publishing-plugin.version>0.7.0</central-publishing-plugin.version>
+        <flatten-maven-plugin.version>1.7.3</flatten-maven-plugin.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Spring Boot BOM -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- z-agent-kernel 子模块 BOM 聚合 -->
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-agent-kernel-llm</artifactId>
+                <version>${z-agent-kernel.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-agent-kernel-message</artifactId>
+                <version>${z-agent-kernel.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-agent-kernel-types</artifactId>
+                <version>${z-agent-kernel.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-agent-kernel-tool</artifactId>
+                <version>${z-agent-kernel.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <profiles>
+        <profile>
+            <id>central</id>
+            <properties>
+                <maven.javadoc.skip>false</maven.javadoc.skip>
+                <central.gpg.skip>false</central.gpg.skip>
+            </properties>
+            <distributionManagement>
+                <repository>
+                    <id>central</id>
+                    <url>https://central.sonatype.com</url>
+                </repository>
+                <snapshotRepository>
+                    <id>central</id>
+                    <url>https://central.sonatype.com</url>
+                </snapshotRepository>
+            </distributionManagement>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-deploy-plugin</artifactId>
+                        <version>${maven-deploy-plugin.version}</version>
+                        <configuration><skip>true</skip></configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>${maven-source-plugin.version}</version>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals><goal>jar-no-fork</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>${maven-javadoc-plugin.version}</version>
+                        <configuration>
+                            <doclint>none</doclint>
+                            <failOnError>false</failOnError>
+                            <failOnWarnings>false</failOnWarnings>
+                            <quiet>true</quiet>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <phase>verify</phase>
+                                <goals><goal>jar</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>${maven-gpg-plugin.version}</version>
+                        <configuration>
+                            <skip>${central.gpg.skip}</skip>
+                            <gpgArguments>
+                                <arg>--pinentry-mode</arg>
+                                <arg>loopback</arg>
+                                <arg>--no-tty</arg>
+                            </gpgArguments>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals><goal>sign</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>${central-publishing-plugin.version}</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <tokenAuth>true</tokenAuth>
+                            <autoPublish>true</autoPublish>
+                            <waitUntil>uploaded</waitUntil>
+                            <waitMaxTime>1800</waitMaxTime>
+                            <waitPollingInterval>10</waitPollingInterval>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>${flatten-maven-plugin.version}</version>
+                <configuration>
+                    <updatePomFile>true</updatePomFile>
+                    <flattenMode>oss</flattenMode>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten</id>
+                        <phase>process-resources</phase>
+                        <goals><goal>flatten</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>flatten.clean</id>
+                        <phase>clean</phase>
+                        <goals><goal>clean</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>
