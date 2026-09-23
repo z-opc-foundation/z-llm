@@ -30,6 +30,7 @@ public class ZLlmAutoConfigurationSmokeTest {
     @Test
     public void auto_config_registers_all_gateway_beans() {
         contextRunner.withPropertyValues(
+                "z.llm.enabled=true",
                 "z.llm.credentials[0].alias=openai-primary",
                 "z.llm.credentials[0].vendor=OPENAI",
                 "z.llm.credentials[0].api-key=sk-test",
@@ -49,6 +50,7 @@ public class ZLlmAutoConfigurationSmokeTest {
     @Test
     public void application_yaml_credentials_loaded_into_store() {
         contextRunner.withPropertyValues(
+                "z.llm.enabled=true",
                 "z.llm.credentials[0].alias=openai-primary",
                 "z.llm.credentials[0].vendor=OPENAI",
                 "z.llm.credentials[0].api-key=sk-test",
