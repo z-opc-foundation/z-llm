@@ -5,6 +5,7 @@ import com.zifang.z.llm.api.exception.GatewayException;
 import com.zifang.z.llm.core.properties.GatewayProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.InitializingBean;
 
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,19 +17,32 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>本服务用 sha256 前缀匹配 + 常量时间比较查找 ApiKey.
  *
  * <p>本期由配置文件提供 ApiKey 列表 (后续由 z-llm-admin 通过 zk-config 动态刷新).
+ *
+ * <p>实现 InitializingBean 是因为 @ConfigurationProperties 的字段绑定发生在
+ * <p>bean 构造之后, 若在构造里读 properties.getApiKeys() 会得到空 list.
  */
-public class ApiKeyService {
+public class ApiKeyService implements InitializingBean {
 
     private static final Logger log = LoggerFactory.getLogger(ApiKeyService.class);
 
+    private final GatewayProperties properties;
     private final ConcurrentHashMap<String, ApiKey> activeKeys = new ConcurrentHashMap<>();
 
     public ApiKeyService(GatewayProperties properties) {
-        reload(properties);
+        this.properties = properties;
     }
 
-    public synchronized void reload(GatewayProperties properties) {
+    @Override
+    public void afterPropertiesSet() {
+        reload();
+    }
+
+    public synchronized void reload() {
         activeKeys.clear();
+        if (properties.getApiKeys() == null) {
+            log.info("ApiKeyService loaded active keys: 0 (apiKeys null)");
+            return;
+        }
         for (ApiKey k : properties.getApiKeys()) {
             if (k.getKey() == null || k.getKey().isEmpty()) continue;
             if (!"active".equalsIgnoreCase(k.getStatus())) continue;

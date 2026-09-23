@@ -6,6 +6,7 @@ import com.zifang.z.llm.api.exception.GatewayException;
 import com.zifang.z.llm.core.properties.GatewayProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.InitializingBean;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -18,8 +19,11 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>本类是网关 AK 集中地. 由 z-llm-admin 通过 refresh() 刷新 (配置中心场景).
  * <p>线程安全: 用 ConcurrentHashMap + 不可变快照避免读写竞争.
+ *
+ * <p>实现 InitializingBean 是因为 @ConfigurationProperties 的字段绑定发生在
+ * <p>bean 构造之后, 必须在 afterPropertiesSet() 才能读到 yml 真实值.
  */
-public class LlmCredentialStore {
+public class LlmCredentialStore implements InitializingBean {
 
     private static final Logger log = LoggerFactory.getLogger(LlmCredentialStore.class);
 
@@ -29,12 +33,19 @@ public class LlmCredentialStore {
     /** alias → 凭据 (单一映射, 假设 alias 全局唯一). */
     private final Map<String, LlmCredential> byAlias = new ConcurrentHashMap<>();
 
+    private final GatewayProperties properties;
+
     public LlmCredentialStore(GatewayProperties properties) {
-        reload(properties);
+        this.properties = properties;
+    }
+
+    @Override
+    public void afterPropertiesSet() {
+        reload();
     }
 
     /** 从配置重新加载. */
-    public synchronized void reload(GatewayProperties properties) {
+    public synchronized void reload() {
         Map<Vendor, List<LlmCredential>> newByVendor = new EnumMap<>(Vendor.class);
         Map<String, LlmCredential> newByAlias = new ConcurrentHashMap<>();
 

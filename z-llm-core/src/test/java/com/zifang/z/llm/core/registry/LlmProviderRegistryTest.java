@@ -24,7 +24,9 @@ public class LlmProviderRegistryTest {
         List<LlmCredential> list = new ArrayList<>();
         list.add(c);
         p.setCredentials(list);
-        return new LlmCredentialStore(p);
+        LlmCredentialStore s = new LlmCredentialStore(p);
+        s.afterPropertiesSet();
+        return s;
     }
 
     @Test
@@ -50,6 +52,8 @@ public class LlmProviderRegistryTest {
 
         p.setCredentials(creds);
         LlmCredentialStore store = new LlmCredentialStore(p);
+
+        store.afterPropertiesSet();
         LlmProviderRegistry reg = new LlmProviderRegistry(store);
 
         assertEquals("openai", reg.get(Vendor.OPENAI, "openai-1").name());
