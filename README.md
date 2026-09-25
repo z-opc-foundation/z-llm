@@ -278,6 +278,13 @@ mvn -B -Dmaven.repo.local=/tmp/m2-central-check dependency:get \
   -Dartifact=io.github.yuku123:z-llm-starter:<版>
 ```
 
+父 pom 是 `packaging=pom`，`dependency:get` 必须显式带类型 `-Dartifact=io.github.yuku123:z-llm:<版>:pom`，
+不写类型时它去找 jar 而报失败——那是命令写错了，不是没发布。
+
+实测节奏（0.1.4）：`uploaded 13:12:14Z` → repo1 五个构件**同时** 200 于 `13:33:36Z`，约 21 分钟；
+中途的 404 不能当失败证据。发布成功后再核两件事：repo1 的 `<artifact>-<版>.jar.md5`
+应与本机 `target/` 里的 jar 逐字节相同；带传递依赖、指向空本地仓能一次拉全，才算真能消费。
+
 ## 已知边界
 
 - 真实上游 E2E 只在配了 AK 的环境能跑；本仓默认状态是 5 skipped
