@@ -250,6 +250,34 @@ mvn -o -pl z-llm-core -am test -Dtest=RealUpstreamE2ETest
 测试图片在运行时用 `BufferedImage` 画一张 240×240 PNG，不往仓库塞 base64 字面量；
 两个转发用例断言 `prompt_tokens > 40`，作为"图没被静默丢掉"的探针。
 
+## 发布到 Maven Central
+
+```bash
+mvn -B -P central clean deploy
+```
+
+`central` profile 会补上中央仓要求的四件事：`maven-source-plugin` 的 sources jar、`maven-javadoc-plugin` 的
+javadoc jar（绑在 `verify`）、`maven-gpg-plugin` 的 `.asc` 签名（也绑在 `verify`），再由
+`org.sonatype.central:central-publishing-maven-plugin` 把整包打成 `target/central-publishing/central-bundle.zip` 上传。
+一次上传覆盖父 pom + 4 个子模块：父 pom 只有 `pom` 一份（加 `.asc` 与 4 种校验和共 6 个条目），
+每个子模块是 `jar/pom/sources/javadoc` 四种构件 × 同样 6 个条目 = 24，整包合计 102 个条目。
+
+⚠️ **`BUILD SUCCESS` 不等于已发布**：profile 里 `waitUntil=uploaded`，Maven 只等到"上传成功"就返回，
+控制台的 `Deployment will publish automatically` 之后还有服务端校验与同步。
+凭据取 `~/.m2/settings.xml` 里 id 为 `central` 的 server（token 认证）。
+
+判断"到底发布了没有"，用 repo1 而不是状态 API：
+`curl -s -o /dev/null -w '%{http_code}\n' https://repo1.maven.org/maven2/io/github/yuku123/z-llm-core/<版>/`
+（2026-09-25 发 0.1.4 时实测：`central.sonatype.com/api/v1/publisher/status` 带正确 Basic 认证仍恒返回
+`{"httpStatus":500,"errorCode":10500}`，鉴权是对的——不带认证返回 401 `Invalid auth`——所以这个接口不能当验收依据）。
+更硬的验收是从干净本地仓拉一次，能解析下来才算真能消费：
+
+```bash
+mvn -B -Dmaven.repo.local=/tmp/m2-central-check dependency:get \
+  -Dtransitive=false -DremoteRepositories=https://repo1.maven.org/maven2 \
+  -Dartifact=io.github.yuku123:z-llm-starter:<版>
+```
+
 ## 已知边界
 
 - 真实上游 E2E 只在配了 AK 的环境能跑；本仓默认状态是 5 skipped
