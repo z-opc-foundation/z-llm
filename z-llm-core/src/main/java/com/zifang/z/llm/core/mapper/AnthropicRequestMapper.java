@@ -122,6 +122,9 @@ public class AnthropicRequestMapper {
                         String mt = textOrNull(source, "media_type");
                         String data = textOrNull(source, "data");
                         img.setUrl("data:" + mt + ";base64," + data);
+                    } else if (source.isObject()) {
+                        // source.type=url: 直接透传外链, 否则图片会以空 url 下发.
+                        img.setUrl(textOrNull(source, "url"));
                     }
                     p.setImageUrl(img);
                     parts.add(p);

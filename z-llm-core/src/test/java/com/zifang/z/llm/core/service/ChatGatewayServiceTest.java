@@ -262,9 +262,30 @@ public class ChatGatewayServiceTest {
         assertTrue(openai.requests().get(0).isStream());
     }
 
-    /** 多模态: kernel 的 Msg 没有图片位, 只能摊平文本, 但绝不能假装图被看见了. */
+    /** 没有 relay 时宁可报错: 摊平成纯文本会让上游"看不见图"却给出一个像样的回答. */
     @Test
-    public void multimodalPartsAreFlattenedToText() {
+    public void multimodalWithoutRelayFailsLoudly() {
+        UnifiedRequest r = imageRequest();
+        try {
+            service.chat(r, key);
+            fail("expected image parts to be refused without a relay");
+        } catch (GatewayException expected) {
+            assertEquals(400, expected.getHttpStatus());
+            assertTrue(expected.getMessage().contains("allow-multimodal-downgrade"));
+        }
+        assertTrue("refused request must not reach the provider", openai.requests().isEmpty());
+    }
+
+    /** 显式降级后回到老行为: 只下发 text 部分, 由调用方自己承担"图没被看见"的后果. */
+    @Test
+    public void multimodalDowngradeIsOptIn() {
+        props.setAllowMultimodalDowngrade(true);
+        service.chat(imageRequest(), key);
+        assertEquals("what is in this image?",
+                openai.requests().get(0).getMessages().get(0).getContent());
+    }
+
+    private UnifiedRequest imageRequest() {
         UnifiedRequest r = new UnifiedRequest();
         r.setModel("openai/gpt-4o");
         UnifiedMessage m = new UnifiedMessage();
@@ -279,10 +300,7 @@ public class ChatGatewayServiceTest {
         img.setImageUrl(iu);
         m.setContents(Arrays.asList(text, img));
         r.setMessages(Collections.singletonList(m));
-
-        service.chat(r, key);
-        assertEquals("what is in this image?",
-                openai.requests().get(0).getMessages().get(0).getContent());
+        return r;
     }
 
     @Test

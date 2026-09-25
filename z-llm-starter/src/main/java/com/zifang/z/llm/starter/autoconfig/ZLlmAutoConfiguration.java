@@ -9,7 +9,11 @@ import com.zifang.z.llm.core.registry.LlmProviderRegistry;
 import com.zifang.z.llm.core.resilience.ProviderInvoker;
 import com.zifang.z.llm.core.router.ModelRouter;
 import com.zifang.z.llm.core.service.ChatGatewayService;
+import com.zifang.z.llm.core.service.EmbeddingService;
+import com.zifang.z.llm.core.service.MultimodalChatRelay;
 import com.zifang.z.llm.core.service.RateLimiter;
+import com.zifang.z.llm.core.upstream.LlmHttpUpstream;
+import com.zifang.z.llm.core.upstream.UpstreamHttp;
 import com.zifang.z.llm.core.usage.UsageLedger;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -80,6 +84,36 @@ public class ZLlmAutoConfiguration {
     }
 
     @Bean
+    @ConditionalOnMissingBean(UpstreamHttp.class)
+    public UpstreamHttp upstreamHttp(GatewayProperties properties) {
+        return new LlmHttpUpstream(properties.getUpstreamConnectTimeoutSec(),
+                properties.getUpstreamReadTimeoutSec(), properties.getUpstreamWriteTimeoutSec());
+    }
+
+    /** 带图片的请求绕过 kernel provider 直连上游 (provider 传不了多模态). */
+    @Bean
+    public MultimodalChatRelay multimodalChatRelay(LlmCredentialStore credentialStore,
+                                                    ProviderInvoker invoker,
+                                                    UsageLedger usageLedger,
+                                                    RateLimiter rateLimiter,
+                                                    UpstreamHttp upstreamHttp) {
+        return new MultimodalChatRelay(credentialStore, invoker, usageLedger, rateLimiter, upstreamHttp);
+    }
+
+    @Bean
+    public EmbeddingService embeddingService(GatewayProperties properties,
+                                             LlmCredentialStore credentialStore,
+                                             ModelRouter router,
+                                             ProviderInvoker invoker,
+                                             UsageLedger usageLedger,
+                                             RateLimiter rateLimiter,
+                                             AccessControl accessControl,
+                                             UpstreamHttp upstreamHttp) {
+        return new EmbeddingService(properties, credentialStore, router, invoker,
+                usageLedger, rateLimiter, accessControl, upstreamHttp);
+    }
+
+    @Bean
     public ChatGatewayService chatGatewayService(LlmProviderRegistry registry,
                                                  LlmCredentialStore credentialStore,
                                                  ModelRouter router,
@@ -87,9 +121,12 @@ public class ZLlmAutoConfiguration {
                                                  UsageLedger usageLedger,
                                                  RateLimiter rateLimiter,
                                                  AccessControl accessControl,
-                                                 GatewayProperties properties) {
-        return new ChatGatewayService(registry, credentialStore, router, invoker,
+                                                 GatewayProperties properties,
+                                                 MultimodalChatRelay relay) {
+        ChatGatewayService service = new ChatGatewayService(registry, credentialStore, router, invoker,
                 usageLedger, rateLimiter, accessControl, properties);
+        service.setRelay(relay);
+        return service;
     }
 
     /** ObjectMapper 由 Spring Boot 默认注册; 无 web-json 的容器下兜一个, 保证 controller 构造注入不断. */

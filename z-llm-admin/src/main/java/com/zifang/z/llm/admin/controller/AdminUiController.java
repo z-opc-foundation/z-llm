@@ -1,5 +1,6 @@
 package com.zifang.z.llm.admin.controller;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -10,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
  */
 @Controller
 @RequestMapping("/z-llm/admin/ui")
+@ConditionalOnProperty(name = "z.llm.expose-admin", havingValue = "true")
 public class AdminUiController {
 
     @GetMapping({"", "/", "/index"})

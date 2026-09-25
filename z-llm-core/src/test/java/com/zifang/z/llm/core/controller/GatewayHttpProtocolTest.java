@@ -1,8 +1,10 @@
 package com.zifang.z.llm.core.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.z.agent.kernel.llm.support.LlmException;
 import com.zifang.z.llm.api.dto.ApiKey;
 import com.zifang.z.llm.api.dto.Vendor;
+import com.zifang.z.llm.api.exception.GatewayException;
 import com.zifang.z.llm.core.auth.AccessControl;
 import com.zifang.z.llm.core.credential.ApiKeyService;
 import com.zifang.z.llm.core.properties.GatewayProperties;
@@ -11,8 +13,11 @@ import com.zifang.z.llm.core.registry.LlmProviderRegistry;
 import com.zifang.z.llm.core.resilience.ProviderInvoker;
 import com.zifang.z.llm.core.router.ModelRouter;
 import com.zifang.z.llm.core.service.ChatGatewayService;
+import com.zifang.z.llm.core.service.EmbeddingService;
+import com.zifang.z.llm.core.service.MultimodalChatRelay;
 import com.zifang.z.llm.core.service.RateLimiter;
 import com.zifang.z.llm.core.support.FakeLlmProvider;
+import com.zifang.z.llm.core.support.FakeUpstreamHttp;
 import com.zifang.z.llm.core.support.TestFixtures;
 import com.zifang.z.llm.core.usage.UsageLedger;
 import org.junit.Before;
@@ -28,7 +33,9 @@ import java.util.Arrays;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -48,7 +55,11 @@ public class GatewayHttpProtocolTest {
     private GatewayProperties props;
     private FakeLlmProvider openai;
     private FakeLlmProvider anthropic;
+    private LlmCredentialStore store;
+    private LlmProviderRegistry registry;
     private RateLimiter rateLimiter;
+    private FakeUpstreamHttp upstream;
+    private UsageLedger ledger;
     private MockMvc openaiMvc;
     private MockMvc anthropicMvc;
 
@@ -61,8 +72,8 @@ public class GatewayHttpProtocolTest {
         ApiKey key = TestFixtures.key("k1", "sk-live-1", null, null);
         props.setApiKeys(new ArrayList<>(Arrays.asList(key)));
 
-        LlmCredentialStore store = TestFixtures.store(props);
-        LlmProviderRegistry registry = TestFixtures.registry(store);
+        store = TestFixtures.store(props);
+        registry = TestFixtures.registry(store);
         openai = new FakeLlmProvider("openai", "gpt-");
         anthropic = new FakeLlmProvider("anthropic", "claude-");
         registry.replace(Vendor.OPENAI, "ak-a", openai);
@@ -70,16 +81,23 @@ public class GatewayHttpProtocolTest {
 
         ModelRouter router = new ModelRouter(registry, props);
         rateLimiter = new RateLimiter(props);
-        ChatGatewayService service = new ChatGatewayService(registry, store, router,
-                new ProviderInvoker(props, registry, store),
-                new UsageLedger(props), rateLimiter, new AccessControl(props), props);
+        ProviderInvoker invoker = new ProviderInvoker(props, registry, store);
+        ledger = new UsageLedger(props);
+        upstream = new FakeUpstreamHttp();
+        MultimodalChatRelay relay = new MultimodalChatRelay(store, invoker, ledger, rateLimiter, upstream);
+        ChatGatewayService service = new ChatGatewayService(registry, store, router, invoker,
+                ledger, rateLimiter, new AccessControl(props), props);
+        service.setRelay(relay);
+        EmbeddingService embeddingService = new EmbeddingService(props, store, router, invoker,
+                ledger, rateLimiter, new AccessControl(props), upstream);
 
         ApiKeyService apiKeyService = new ApiKeyService(props);
         apiKeyService.afterPropertiesSet();
         ObjectMapper json = new ObjectMapper();
 
         openaiMvc = MockMvcBuilders.standaloneSetup(
-                        new OpenAIController(service, apiKeyService, rateLimiter, json, router))
+                        new OpenAIController(service, apiKeyService, rateLimiter, json, router,
+                                embeddingService))
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .build();
         anthropicMvc = MockMvcBuilders.standaloneSetup(
@@ -325,6 +343,343 @@ public class GatewayHttpProtocolTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"model\":\"gemini/gemini-2.5-pro\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"))
                 .andExpect(status().isNotFound());
+    }
+
+    // ---- /v1/embeddings ----
+
+    @Test
+    public void embeddingsReturnsOpenAiShapedVectors() throws Exception {
+        upstream.enqueue("{\"object\":\"list\",\"data\":["
+                + "{\"object\":\"embedding\",\"index\":0,\"embedding\":[0.5,0.25]},"
+                + "{\"object\":\"embedding\",\"index\":1,\"embedding\":[0.125,0.75]}],"
+                + "\"model\":\"text-embedding-3-small\","
+                + "\"usage\":{\"prompt_tokens\":7,\"total_tokens\":7}}");
+
+        openaiMvc.perform(post("/v1/embeddings")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"openai/text-embedding-3-small\",\"input\":[\"a\",\"b\"]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.object").value("list"))
+                .andExpect(jsonPath("$.data.length()").value(2))
+                .andExpect(jsonPath("$.data[0].object").value("embedding"))
+                .andExpect(jsonPath("$.data[0].embedding[1]").value(0.25))
+                .andExpect(jsonPath("$.data[1].embedding[0]").value(0.125))
+                .andExpect(jsonPath("$.model").value("openai/text-embedding-3-small"))
+                .andExpect(jsonPath("$.usage.prompt_tokens").value(7))
+                .andExpect(jsonPath("$.usage.total_tokens").value(7));
+
+        assertEquals(1, upstream.callCount());
+        FakeUpstreamHttp.Call call = upstream.lastCall();
+        assertTrue("应打到 OpenAI 兼容 embeddings 端点: " + call.url,
+                call.url.endsWith("/v1/embeddings"));
+        assertEquals("Bearer sk-test-ak-a", call.header("Authorization"));
+        assertEquals("网关侧命名空间不能漏进上游 model",
+                "text-embedding-3-small", call.field("model").asText());
+        assertEquals(2, call.field("input").size());
+        ApiKey k1 = TestFixtures.key("k1", "sk-live-1", null, null);
+        assertEquals("向量用量必须进台账 (只算 prompt 侧)", 7L, ledger.totalTokens(k1));
+    }
+
+    @Test
+    public void embeddingsSingleStringInputIsAccepted() throws Exception {
+        upstream.enqueue("{\"data\":[{\"index\":0,\"embedding\":[1.0]}],\"usage\":{\"prompt_tokens\":3}}");
+        openaiMvc.perform(post("/v1/embeddings")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"openai/text-embedding-3-small\",\"input\":\"hello\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(1));
+        assertEquals(1, upstream.lastCall().field("input").size());
+    }
+
+    @Test
+    public void embeddingsRejectsEmptyAndOversizedInputWithoutCallingUpstream() throws Exception {
+        openaiMvc.perform(post("/v1/embeddings")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"openai/text-embedding-3-small\",\"input\":[]}"))
+                .andExpect(status().isBadRequest());
+
+        props.setMaxEmbeddingBatch(2);
+        openaiMvc.perform(post("/v1/embeddings")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"openai/text-embedding-3-small\",\"input\":[\"a\",\"b\",\"c\"]}"))
+                .andExpect(status().isBadRequest());
+
+        assertEquals("两类入参错误都必须在出网之前挡掉", 0, upstream.callCount());
+    }
+
+    @Test
+    public void embeddingsForVendorWithoutEndpointIsRejected() throws Exception {
+        openaiMvc.perform(post("/v1/embeddings")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"anthropic/claude-3-5-sonnet\",\"input\":\"hi\"}"))
+                .andExpect(status().isBadRequest());
+        assertEquals(0, upstream.callCount());
+    }
+
+    @Test
+    public void embeddingsFailOverToNextCredentialOnUpstream500() throws Exception {
+        props.setCredentials(new ArrayList<>(Arrays.asList(
+                TestFixtures.credential(Vendor.OPENAI, "ak-a", 1),
+                TestFixtures.credential(Vendor.OPENAI, "ak-b", 2),
+                TestFixtures.credential(Vendor.ANTHROPIC, "ak-anth", 1))));
+        store.reload();
+        registry.replace(Vendor.OPENAI, "ak-b", new FakeLlmProvider("openai", "gpt-"));
+
+        upstream.failNext(new LlmException("openai", 500, "upstream boom"));
+        upstream.enqueue("{\"data\":[{\"index\":0,\"embedding\":[1.0]}]}");
+
+        openaiMvc.perform(post("/v1/embeddings")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"openai/text-embedding-3-small\",\"input\":\"a\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(1));
+
+        assertEquals("首个凭据 5xx 后必须换下一个", 2, upstream.callCount());
+        assertEquals("Bearer sk-test-ak-a", upstream.calls().get(0).header("Authorization"));
+        assertEquals("Bearer sk-test-ak-b", upstream.calls().get(1).header("Authorization"));
+    }
+
+    @Test
+    public void embeddingsUpstream429BecomesGateway429NotAGeneric502() throws Exception {
+        upstream.failNext(new LlmException("openai", 429, "slow down"));
+        upstream.enqueue("{\"data\":[{\"index\":0,\"embedding\":[1.0]}]}");
+
+        openaiMvc.perform(post("/v1/embeddings")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"openai/text-embedding-3-small\",\"input\":\"a\"}"))
+                .andExpect(status().isTooManyRequests());
+    }
+
+    // ---- 多模态转发 ----
+
+    @Test
+    public void imagePartsAreRelayedToUpstreamInsteadOfFlattened() throws Exception {
+        upstream.enqueue("{\"id\":\"gen-9\",\"object\":\"chat.completion\",\"model\":\"gpt-4o\","
+                + "\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"a cat\"},"
+                + "\"finish_reason\":\"stop\"}],"
+                + "\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":2,\"total_tokens\":13}}");
+
+        openaiMvc.perform(post("/v1/chat/completions")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"openai/gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":["
+                                + "{\"type\":\"text\",\"text\":\"what is this\"},"
+                                + "{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\",\"detail\":\"low\"}}"
+                                + "]}]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.choices[0].message.content").value("a cat"))
+                .andExpect(jsonPath("$.model").value("openai/gpt-4o"))
+                .andExpect(jsonPath("$.usage.total_tokens").value(13));
+
+        assertEquals("带图请求必须走直连面", 1, upstream.callCount());
+        assertEquals("kernel provider 不该被碰 (它传不了图)", 0, openai.chatCalls());
+        FakeUpstreamHttp.Call call = upstream.lastCall();
+        assertTrue(call.url.endsWith("/v1/chat/completions"));
+        com.fasterxml.jackson.databind.JsonNode content =
+                call.field("messages").get(0).path("content");
+        assertTrue("content 必须是多模态数组", content.isArray());
+        assertEquals("what is this", content.get(0).path("text").asText());
+        assertEquals("https://x/y.png", content.get(1).path("image_url").path("url").asText());
+        assertEquals("low", content.get(1).path("image_url").path("detail").asText());
+        assertFalse("转发请求不能带网关侧命名空间", call.field("model").asText().contains("openai/"));
+        ApiKey k1 = TestFixtures.key("k1", "sk-live-1", null, null);
+        assertEquals(13L, ledger.totalTokens(k1));
+    }
+
+    @Test
+    public void imagePartsToNonCompatibleVendorFailLoudly() throws Exception {
+        props.setCredentials(new ArrayList<>(Arrays.asList(
+                TestFixtures.credential(Vendor.OPENAI, "ak-a", 1),
+                TestFixtures.credential(Vendor.ANTHROPIC, "ak-anth", 1),
+                TestFixtures.credential(Vendor.DASHSCOPE, "ak-ds", 1))));
+        store.reload();
+        registry.replace(Vendor.DASHSCOPE, "ak-ds", new FakeLlmProvider("dashscope", "qwen-vl-"));
+
+        openaiMvc.perform(post("/v1/chat/completions")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"dashscope/qwen-vl-plus\",\"messages\":[{\"role\":\"user\","
+                                + "\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\"}}]}]}"))
+                .andExpect(status().isBadRequest());
+
+        assertEquals("绝不能退回一个没看到图的回答", 0, upstream.callCount());
+        assertEquals(0, anthropic.chatCalls());
+    }
+
+    @Test
+    public void relayedStreamEmitsSseFramesWithUsage() throws Exception {
+        upstream.stream(
+                "{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":"
+                        + "[{\"index\":0,\"delta\":{\"content\":\"a \"}}]}",
+                "{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":"
+                        + "[{\"index\":0,\"delta\":{\"content\":\"cat\"},\"finish_reason\":\"stop\"}]}",
+                "{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-4o\",\"choices\":[],"
+                        + "\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":2,\"total_tokens\":13}}");
+
+        MvcResult res = openaiMvc.perform(post("/v1/chat/completions")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"openai/gpt-4o\",\"stream\":true,\"messages\":[{\"role\":\"user\","
+                                + "\"content\":[{\"type\":\"text\",\"text\":\"describe\"},"
+                                + "{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://x/y.png\"}}]}]}"))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        MockHttpServletResponse resp = res.getResponse();
+        assertTrue("流式必须是 event-stream: " + resp.getContentType(),
+                resp.getContentType().startsWith(MediaType.TEXT_EVENT_STREAM_VALUE));
+        String body = resp.getContentAsString();
+        assertEquals("收尾标记恰好一次", 1, countOccurrences(body, "data: [DONE]"));
+        assertEquals("3 帧内容 + 1 个 [DONE]", 4, countOccurrences(body, "data:"));
+        assertTrue("上游裸名要补回命名空间: " + body, body.contains("openai/gpt-4o"));
+        assertTrue("流式末片 usage 必须透传: " + body, body.contains("\"total_tokens\":13"));
+        assertTrue("出站体必须带 stream", upstream.lastCall().field("stream").asBoolean());
+        assertEquals(0, openai.chatCalls());
+    }
+
+    // ---- Anthropic 原生多模态转发 ----
+
+    @Test
+    public void imagePartsForAnthropicAreRelayedAsNativeBlocks() throws Exception {
+        upstream.enqueue("{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\","
+                + "\"model\":\"claude-3-5-sonnet\","
+                + "\"content\":[{\"type\":\"text\",\"text\":\"a cat\"}],"
+                + "\"stop_reason\":\"end_turn\","
+                + "\"usage\":{\"input_tokens\":11,\"output_tokens\":2}}");
+
+        openaiMvc.perform(post("/v1/chat/completions")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"anthropic/claude-3-5-sonnet\",\"messages\":[{\"role\":\"user\",\"content\":["
+                                + "{\"type\":\"text\",\"text\":\"what is this\"},"
+                                + "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,AAA=\"}}"
+                                + "]}]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.choices[0].message.content").value("a cat"))
+                .andExpect(jsonPath("$.choices[0].finish_reason").value("stop"))
+                .andExpect(jsonPath("$.model").value("anthropic/claude-3-5-sonnet"))
+                .andExpect(jsonPath("$.usage.prompt_tokens").value(11))
+                .andExpect(jsonPath("$.usage.total_tokens").value(13));
+
+        assertEquals(1, upstream.callCount());
+        FakeUpstreamHttp.Call call = upstream.lastCall();
+        assertTrue("Anthropic 的 base 不带版本段, 端点必须自己拼 /v1/messages: " + call.url,
+                call.url.endsWith("/v1/messages"));
+        assertEquals("Messages API 只认 x-api-key", "sk-test-ak-anth", call.header("x-api-key"));
+        assertNull("发 Bearer 会被上游当成缺 key", call.header("Authorization"));
+        assertEquals("max_tokens 是 Messages API 的必填项", 8192, call.field("max_tokens").asInt());
+
+        com.fasterxml.jackson.databind.JsonNode msg = call.field("messages").get(0);
+        assertEquals("user", msg.path("role").asText());
+        com.fasterxml.jackson.databind.JsonNode content = msg.path("content");
+        assertTrue("带图必须用 block 数组", content.isArray());
+        assertEquals("image", content.get(1).path("type").asText());
+        com.fasterxml.jackson.databind.JsonNode source = content.get(1).path("source");
+        assertEquals("base64", source.path("type").asText());
+        assertEquals("image/png", source.path("media_type").asText());
+        assertEquals("AAA=", source.path("data").asText());
+        assertEquals("kernel provider 传不了图, 不能被碰", 0, anthropic.chatCalls());
+        ApiKey k1 = TestFixtures.key("k1", "sk-live-1", null, null);
+        assertEquals(13L, ledger.totalTokens(k1));
+    }
+
+    @Test
+    public void nativeMessagesEndpointRelaysImagesAndKeepsAnthropicShape() throws Exception {
+        upstream.enqueue("{\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\","
+                + "\"model\":\"claude-3-5-sonnet\","
+                + "\"content\":[{\"type\":\"text\",\"text\":\"a dog\"}],"
+                + "\"stop_reason\":\"max_tokens\","
+                + "\"usage\":{\"input_tokens\":9,\"output_tokens\":4}}");
+
+        anthropicMvc.perform(post("/v1/messages")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"claude-3-5-sonnet\",\"system\":\"be terse\",\"max_tokens\":64,"
+                                + "\"messages\":[{\"role\":\"user\",\"content\":["
+                                + "{\"type\":\"text\",\"text\":\"what is this\"},"
+                                + "{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+                                + "\"media_type\":\"image/jpeg\",\"data\":\"//9z\"}}]}]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.type").value("message"))
+                .andExpect(jsonPath("$.content[0].type").value("text"))
+                .andExpect(jsonPath("$.content[0].text").value("a dog"))
+                .andExpect(jsonPath("$.stop_reason").value("max_tokens"))
+                .andExpect(jsonPath("$.usage.input_tokens").value(9))
+                .andExpect(jsonPath("$.usage.output_tokens").value(4));
+
+        FakeUpstreamHttp.Call call = upstream.lastCall();
+        assertEquals("system 必须提到顶层", "be terse", call.field("system").asText());
+        assertEquals("system 不该留在 messages 里 (上游会 400)", 1, call.field("messages").size());
+        assertEquals("调用方给的 max_tokens 不能被默认值盖掉", 64, call.field("max_tokens").asInt());
+        com.fasterxml.jackson.databind.JsonNode source =
+                call.field("messages").get(0).path("content").get(1).path("source");
+        assertEquals("image/jpeg", source.path("media_type").asText());
+        assertEquals("//9z", source.path("data").asText());
+    }
+
+    @Test
+    public void relayedAnthropicStreamIsReframedIntoNativeEvents() throws Exception {
+        upstream.stream(
+                "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_9\",\"type\":\"message\","
+                        + "\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet\","
+                        + "\"usage\":{\"input_tokens\":11,\"output_tokens\":0}}}",
+                "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+                "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"a \"}}",
+                "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"cat\"}}",
+                "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},"
+                        + "\"usage\":{\"output_tokens\":2}}",
+                "{\"type\":\"message_stop\"}");
+
+        MvcResult res = anthropicMvc.perform(post("/v1/messages")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"model\":\"claude-3-5-sonnet\",\"stream\":true,\"messages\":[{\"role\":\"user\","
+                                + "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"url\","
+                                + "\"url\":\"https://x/y.png\"}}]}]}"))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        String body = res.getResponse().getContentAsString();
+        assertTrue("必须回 message_start: " + body, body.contains("event: message_start"));
+        assertEquals("两段文本增量都要透传", 2, countOccurrences(body, "text_delta"));
+        assertEquals("文本块只能开一次", 1, countOccurrences(body, "event: content_block_start"));
+        assertTrue(body.contains("event: message_stop"));
+        assertFalse("不该出现错误帧", body.contains("event: error"));
+        assertEquals("外链 source 的 url 不能被丢", "https://x/y.png",
+                upstream.lastCall().field("messages").get(0).path("content").get(0)
+                        .path("source").path("url").asText());
+    }
+
+    @Test
+    public void relayedAnthropicStreamErrorFrameFailsTheStream() throws Exception {
+        upstream.stream(
+                "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_10\",\"model\":\"claude-3-5-sonnet\"}}",
+                "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}");
+
+        try {
+            anthropicMvc.perform(post("/v1/messages")
+                    .header("Authorization", AUTH)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"model\":\"claude-3-5-sonnet\",\"stream\":true,\"messages\":[{\"role\":\"user\","
+                            + "\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"url\","
+                            + "\"url\":\"https://x/y.png\"}}]}]}")).andReturn();
+            fail("error 帧必须让调用方看到失败, 不能当成正常收尾");
+        } catch (Exception expected) {
+            Throwable root = expected;
+            while (root.getCause() != null && root.getCause() != root) {
+                root = root.getCause();
+            }
+            assertTrue("实际: " + root, root instanceof GatewayException);
+            assertTrue(root.getMessage().contains("Overloaded"));
+        }
+        assertEquals(1, upstream.callCount());
     }
 
     private static int countOccurrences(String haystack, String needle) {

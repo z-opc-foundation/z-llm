@@ -16,13 +16,15 @@ public class GatewayPropertiesTest {
     @Test
     public void defaults_are_safe() {
         GatewayProperties p = new GatewayProperties();
-        assertEquals("", p.getBasePath());
         assertNotNull(p.getCredentials());
         assertNotNull(p.getApiKeys());
         assertTrue(p.getCredentials().isEmpty());
         assertFalse(p.isExposeAdmin());
         assertEquals(Integer.valueOf(32768), p.getMaxTokensLimit());
         assertTrue(p.isRateLimitEnabled());
+        // 多模态默认"转发但不降级": 图片不能被静默摊平成文本.
+        assertTrue(p.isRelayMultimodal());
+        assertFalse(p.isAllowMultimodalDowngrade());
     }
 
     @Test

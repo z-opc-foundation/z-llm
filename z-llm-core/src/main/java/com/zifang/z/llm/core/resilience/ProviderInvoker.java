@@ -169,9 +169,23 @@ public class ProviderInvoker {
                 sleepBackoff(retry, i);
             }
         }
-        throw GatewayException.upstreamFailed(
-                "All " + tried + " credential(s) of vendor " + vendor.code() + " failed: "
-                        + (last == null ? "unknown" : last.getMessage()), last);
+        throw poolExhausted(tried, vendor, last);
+    }
+
+    /**
+     * 池子跑光后的对外状态码.
+     *
+     * <p>429 单独放行: 把它压成 502 会让客户端按"上游坏了"去无限重试, 而正确动作是退避。
+     * 其余 (5xx / 未知) 仍是 502 — 上游拒绝的是网关的凭据, 不是调用方的请求。
+     */
+    private static GatewayException poolExhausted(int tried, Vendor vendor, Throwable last) {
+        String detail = "All " + tried + " credential(s) of vendor " + vendor.code() + " failed: "
+                + (last == null ? "unknown" : last.getMessage());
+        Integer status = httpStatusOf(last);
+        if (status != null && status == 429) {
+            return GatewayException.rateLimited(detail);
+        }
+        return GatewayException.upstreamFailed(detail, last);
     }
 
     private List<Handle> candidatesOrSingle(Vendor vendor) {

@@ -25,6 +25,7 @@ import com.zifang.z.llm.core.registry.LlmCredentialStore;
 import com.zifang.z.llm.core.registry.LlmProviderRegistry;
 import com.zifang.z.llm.core.resilience.ProviderInvoker;
 import com.zifang.z.llm.core.router.ModelRouter;
+import com.zifang.z.llm.core.upstream.UpstreamEndpoints;
 import com.zifang.z.llm.core.usage.UsageLedger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -67,6 +68,9 @@ public class ChatGatewayService {
     private final RateLimiter rateLimiter;
     private final AccessControl accessControl;
     private final com.zifang.z.llm.core.properties.GatewayProperties properties;
+
+    /** 可选协作者: 带图片的请求改由它直连上游 (kernel provider 传不了多模态). */
+    private MultimodalChatRelay relay;
 
     public ChatGatewayService(LlmProviderRegistry providerRegistry,
                               LlmCredentialStore credentialStore,
@@ -168,6 +172,10 @@ public class ChatGatewayService {
     /** 同步 chat. */
     public ChatOutcome chat(UnifiedRequest request, ApiKey key) {
         ModelRouter.Resolved resolved = prepare(request, key);
+        if (useRelay(request, resolved)) {
+            MultimodalChatRelay.RelayResult r = relay.chat(request, resolved, key);
+            return new ChatOutcome(r.response(), r.usage(), resolved.vendor(), r.credential());
+        }
         ChatCompletionsRequest kernelReq = toKernelRequest(request, resolved, false);
 
         final Vendor vendor = resolved.vendor();
@@ -200,6 +208,11 @@ public class ChatGatewayService {
                                     Runnable onComplete) {
         ModelRouter.Resolved resolved = prepare(request, key);
         final Vendor vendor = resolved.vendor();
+        if (useRelay(request, resolved)) {
+            MultimodalChatRelay.RelayResult r = relay.streamChat(
+                    request, resolved, key, onChunk, onError, onComplete);
+            return new StreamOutcome(r.usage(), vendor, r.credential(), r.chunks());
+        }
         ChatCompletionsRequest kernelReq = toKernelRequest(request, resolved, true);
 
         final AtomicBoolean finished = new AtomicBoolean(false);
@@ -245,7 +258,7 @@ public class ChatGatewayService {
                             }
                             chunkCount[0]++;
                             emitted.set(true);
-                            onChunk.accept(fromKernelChunk(chunk));
+                            onChunk.accept(fromKernelChunk(chunk, resolved));
                             String fr = chunkFinishReason(chunk);
                             if (fr != null) {
                                 finish.run();
@@ -322,6 +335,39 @@ public class ChatGatewayService {
     }
 
     // ---- 前置: 路由 + 授权 ----
+
+    /** 注入多模态直连面 (可选; 不注入时带图请求按降级/报错两条老路走). */
+    public void setRelay(MultimodalChatRelay relay) {
+        this.relay = relay;
+    }
+
+    /**
+     * 本次请求是否该绕过 kernel provider 直连上游.
+     *
+     * <p>只有"请求里确实带图片"才值得绕开主链路 —— 纯文本请求仍走 provider, 免得两条路
+     * 的鉴权/重试行为出现无谓差异。
+     *
+     * @throws GatewayException 带图但无法直连, 且部署方没打开摊平降级时
+     */
+    private boolean useRelay(UnifiedRequest request, ModelRouter.Resolved resolved) {
+        if (!MultimodalChatRelay.carriesNonTextParts(request)) {
+            return false;
+        }
+        boolean canRelay = relay != null
+                && properties != null && properties.isRelayMultimodal()
+                && UpstreamEndpoints.canRelayChat(resolved.vendor());
+        if (canRelay) {
+            return true;
+        }
+        if (properties != null && properties.isAllowMultimodalDowngrade()) {
+            return false;
+        }
+        throw GatewayException.invalidRequest(
+                "request carries image parts but vendor " + resolved.vendor().code()
+                        + " cannot receive them (the gateway relays images for openai/deepseek/qwen"
+                        + " and anthropic; set z.llm.allow-multimodal-downgrade=true to accept"
+                        + " text-only flattening)");
+    }
 
     private ModelRouter.Resolved prepare(UnifiedRequest request, ApiKey key) {
         if (request == null) {
@@ -417,9 +463,10 @@ public class ChatGatewayService {
     }
 
     /**
-     * kernel 的 Msg 只承载纯文本 content, 因此多模态数组要摊平成文本,
-     * 并且必须把被丢弃的非文本 part 显式说出来 — 否则图片消息会"成功"返回一个
-     * 完全没看到图的回答.
+     * 多模态摊平路径: kernel 的 provider 只把 {@code Msg.content} 当文本下发 (它不读
+     * {@code Msg.metadata}), 所以走这条路的图片必然到不了模型。
+     * 默认不会走到这里 —— {@code useRelay} 会先要求直连或显式报错, 只有部署方打开
+     * {@code z.llm.allow-multimodal-downgrade} 才允许静默丢图。
      */
     private String textOf(UnifiedMessage m) {
         List<ContentPart> parts = m.getContents();
@@ -442,9 +489,9 @@ public class ChatGatewayService {
             }
         }
         if (!dropped.isEmpty()) {
-            log.warn("message role={} carried {} non-text part(s) {} which the gateway cannot "
-                            + "forward (kernel Msg has no multimodal field) — response will be "
-                            + "text-only",
+            log.warn("message role={} carried {} non-text part(s) {} which were flattened to text "
+                            + "because z.llm.allow-multimodal-downgrade is on — the model never saw "
+                            + "them, so the answer is text-only by construction",
                     m.getRole(), dropped.size(), dropped);
         }
         return sb.length() == 0 ? m.getContent() : sb.toString();
@@ -468,7 +515,7 @@ public class ChatGatewayService {
         UnifiedResponse out = new UnifiedResponse();
         out.setId(r.getId());
         // 对外回显调用方使用的命名空间 id, 而不是 vendor 内部裸 id.
-        out.setModel(externalModel(r.getModel(), resolved));
+        out.setModel(ModelNames.external(r.getModel(), resolved));
         out.setCreated(System.currentTimeMillis() / 1000L);
         out.setObject("chat.completion");
         List<Choice> choices = new ArrayList<>();
@@ -488,20 +535,12 @@ public class ChatGatewayService {
         return out;
     }
 
-    private static String externalModel(String served, ModelRouter.Resolved resolved) {
-        if (served == null || served.isEmpty()) {
-            return resolved.canonical();
-        }
-        if (served.contains("/")) {
-            return served;
-        }
-        return resolved.vendor().code() + "/" + served;
-    }
-
-    private UnifiedStreamChunk fromKernelChunk(ChatCompletionsResponse c) {
+    private UnifiedStreamChunk fromKernelChunk(ChatCompletionsResponse c, ModelRouter.Resolved resolved) {
         UnifiedStreamChunk chunk = new UnifiedStreamChunk();
         chunk.setId(c.getId());
-        chunk.setModel(c.getModel());
+        // 流式与同步必须回显同一个 id: 此前这里直接透传上游裸名, 同一个模型经两条路
+        // 会得到 "gpt-4o" 和 "openai/gpt-4o" 两种答案.
+        chunk.setModel(ModelNames.external(c.getModel(), resolved));
         chunk.setCreated(System.currentTimeMillis() / 1000L);
         chunk.setObject("chat.completion.chunk");
         List<Choice> choices = new ArrayList<>();

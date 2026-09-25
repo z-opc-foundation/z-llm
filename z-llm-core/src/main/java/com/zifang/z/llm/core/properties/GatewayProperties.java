@@ -15,13 +15,11 @@ import java.util.Map;
  *
  * <p>credentials: 后端 vendor 凭据列表 (每个 vendor 可配多个 AK 做兜底/轮询).
  * <p>apiKeys: 对外接入凭证列表 (网关签发, 调用方凭此鉴权).
- * <p>exposeAdmin: 是否注册 admin 端点 (默认 false, 由 z-llm-admin 引入后开启).
+ * <p>exposeAdmin: 是否注册 z-llm-admin 的控制面端点 (默认 false). 该开关由 z-llm-admin 的
+ * {@code ZLlmAdminAutoConfiguration} 与两个控制器各自读取, 引入 z-llm-admin 且值为 true 才注册.
  */
 @ConfigurationProperties(prefix = "z.llm")
 public class GatewayProperties {
-
-    /** 网关自身默认 base path (空表示无前缀). */
-    private String basePath = "";
 
     /** 凭据列表. */
     @NestedConfigurationProperty
@@ -70,6 +68,38 @@ public class GatewayProperties {
 
     /** 计费币种标记, 仅用于 /usage 接口回显. */
     private String currency = "USD";
+
+    /**
+     * 带图片 part 的请求是否走"网关直连上游 OpenAI 兼容端点".
+     * <p>kernel 的 provider 只把 {@code Msg.content} 当纯文本下发, 经它转发的图片会被静默丢掉;
+     * 打开后网关对 openai / deepseek / qwen 三家绕过 provider 直连, 图片才真能到模型。
+     */
+    private boolean relayMultimodal = true;
+
+    /**
+     * 直连关闭 (或 vendor 非 OpenAI 兼容) 时, 是否允许把多模态摊平成纯文本继续服务.
+     * <p>默认 false: 宁可显式报错, 也不要返回一个"根本没看到图"的回答。
+     */
+    private boolean allowMultimodalDowngrade = false;
+
+    /** 网关直连上游的连接超时 (秒). */
+    private int upstreamConnectTimeoutSec = 10;
+
+    /** 网关直连上游的读超时 (秒); 流式长回答要留足. */
+    private int upstreamReadTimeoutSec = 300;
+
+    /** 网关直连上游的写超时 (秒). */
+    private int upstreamWriteTimeoutSec = 60;
+
+    /** 单次 /v1/embeddings 最多允许几条输入 (OpenAI 上限 2048). */
+    private int maxEmbeddingBatch = 2048;
+
+    /**
+     * 裸 embedding 模型名 (如 "text-embedding-3-small") 归属的 vendor.
+     * <p>kernel provider 的 supportsModel 只声明对话模型, 向量模型走那条路必然 404,
+     * 因此 embeddings 路由需要这个显式归属; 未配置时若只配了一个 OpenAI 兼容 vendor 则自动选中它。
+     */
+    private String embeddingVendor;
 
     public static class Retry {
         /** 是否启用跨凭据 failover. */
@@ -141,14 +171,6 @@ public class GatewayProperties {
         public void setCompletionPerMillion(double completionPerMillion) {
             this.completionPerMillion = completionPerMillion;
         }
-    }
-
-    public String getBasePath() {
-        return basePath;
-    }
-
-    public void setBasePath(String basePath) {
-        this.basePath = basePath;
     }
 
     public List<LlmCredential> getCredentials() {
@@ -245,5 +267,61 @@ public class GatewayProperties {
 
     public void setCurrency(String currency) {
         this.currency = currency;
+    }
+
+    public boolean isRelayMultimodal() {
+        return relayMultimodal;
+    }
+
+    public void setRelayMultimodal(boolean relayMultimodal) {
+        this.relayMultimodal = relayMultimodal;
+    }
+
+    public boolean isAllowMultimodalDowngrade() {
+        return allowMultimodalDowngrade;
+    }
+
+    public void setAllowMultimodalDowngrade(boolean allowMultimodalDowngrade) {
+        this.allowMultimodalDowngrade = allowMultimodalDowngrade;
+    }
+
+    public int getUpstreamConnectTimeoutSec() {
+        return upstreamConnectTimeoutSec;
+    }
+
+    public void setUpstreamConnectTimeoutSec(int upstreamConnectTimeoutSec) {
+        this.upstreamConnectTimeoutSec = upstreamConnectTimeoutSec;
+    }
+
+    public int getUpstreamReadTimeoutSec() {
+        return upstreamReadTimeoutSec;
+    }
+
+    public void setUpstreamReadTimeoutSec(int upstreamReadTimeoutSec) {
+        this.upstreamReadTimeoutSec = upstreamReadTimeoutSec;
+    }
+
+    public int getUpstreamWriteTimeoutSec() {
+        return upstreamWriteTimeoutSec;
+    }
+
+    public void setUpstreamWriteTimeoutSec(int upstreamWriteTimeoutSec) {
+        this.upstreamWriteTimeoutSec = upstreamWriteTimeoutSec;
+    }
+
+    public int getMaxEmbeddingBatch() {
+        return maxEmbeddingBatch;
+    }
+
+    public void setMaxEmbeddingBatch(int maxEmbeddingBatch) {
+        this.maxEmbeddingBatch = maxEmbeddingBatch;
+    }
+
+    public String getEmbeddingVendor() {
+        return embeddingVendor;
+    }
+
+    public void setEmbeddingVendor(String embeddingVendor) {
+        this.embeddingVendor = embeddingVendor;
     }
 }

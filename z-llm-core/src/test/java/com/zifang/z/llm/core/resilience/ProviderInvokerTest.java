@@ -151,6 +151,19 @@ public class ProviderInvokerTest {
         }
     }
 
+    /** 全池都被上游限流时 429 不能被压成笼统的 502: 客户端的正确动作是退避, 不是立刻重试. */
+    @Test
+    public void exhaustedPoolKeepsUpstream429AsRateLimited() {
+        try {
+            invoker.execute(Vendor.OPENAI, 3, h -> {
+                throw new LlmException("openai", 429, "slow down");
+            });
+            fail("expected 429");
+        } catch (GatewayException e) {
+            assertEquals(429, e.getHttpStatus());
+        }
+    }
+
     @Test
     public void retryDisabledUsesExactlyOneCredential() {
         props.getRetry().setEnabled(false);

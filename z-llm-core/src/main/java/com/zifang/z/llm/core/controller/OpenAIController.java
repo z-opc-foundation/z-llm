@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.zifang.z.agent.kernel.llm.Model;
 import com.zifang.z.llm.api.dto.ApiKey;
+import com.zifang.z.llm.api.dto.EmbeddingsRequest;
+import com.zifang.z.llm.api.dto.EmbeddingsResponse;
 import com.zifang.z.llm.api.dto.ErrorResponse;
 import com.zifang.z.llm.api.dto.UnifiedRequest;
 import com.zifang.z.llm.api.dto.UnifiedResponse;
@@ -15,6 +17,7 @@ import com.zifang.z.llm.core.credential.AuthorizationExtractor;
 import com.zifang.z.llm.core.mapper.OpenAIRequestMapper;
 import com.zifang.z.llm.core.router.ModelRouter;
 import com.zifang.z.llm.core.service.ChatGatewayService;
+import com.zifang.z.llm.core.service.EmbeddingService;
 import com.zifang.z.llm.core.service.RateLimiter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,15 +59,18 @@ public class OpenAIController {
     private final ObjectMapper json;
     private final OpenAIRequestMapper mapper;
     private final ModelRouter modelRouter;
+    private final EmbeddingService embeddingService;
 
     public OpenAIController(ChatGatewayService gateway, ApiKeyService apiKeyService,
-                            RateLimiter rateLimiter, ObjectMapper json, ModelRouter modelRouter) {
+                            RateLimiter rateLimiter, ObjectMapper json, ModelRouter modelRouter,
+                            EmbeddingService embeddingService) {
         this.gateway = gateway;
         this.apiKeyService = apiKeyService;
         this.rateLimiter = rateLimiter;
         this.json = json;
         this.mapper = new OpenAIRequestMapper(json);
         this.modelRouter = modelRouter;
+        this.embeddingService = embeddingService;
     }
 
     /**
@@ -139,6 +145,27 @@ public class OpenAIController {
                 },
                 finish);
         finish.run();
+    }
+
+    /**
+     * POST /v1/embeddings — 向量化.
+     *
+     * <p>kernel 的 LlmProvider 没有 embedding 方法, 这条路由网关按各家真实端点直连上游,
+     * 凭据选择/冷却/failover 仍与 chat 主链路共用 ProviderInvoker。
+     */
+    @PostMapping(value = "/embeddings", consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<EmbeddingsResponse> embeddings(@RequestBody EmbeddingsRequest body,
+                                                         HttpServletRequest req,
+                                                         HttpServletResponse resp) {
+        ApiKey key = AuthorizationExtractor.requireApiKey(req, apiKeyService);
+        // 限流时要在这条响应上打 Retry-After, 所以必须把 resp 传进去而不是 null.
+        acquireOrThrow(key, resp);
+        try {
+            return ResponseEntity.ok(embeddingService.embed(body, key));
+        } finally {
+            rateLimiter.release(key);
+        }
     }
 
     @GetMapping(value = "/models", produces = MediaType.APPLICATION_JSON_VALUE)
