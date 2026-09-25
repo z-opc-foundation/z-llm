@@ -1,14 +1,21 @@
 package com.zifang.z.llm.api.dto;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 /**
  * 用量信息 — 各 vendor 字段基本对齐 (prompt / completion / total).
  *
  * <p>流式 chunk 中部分 vendor 不带 usage, 只在最后一个 chunk 或非流式响应里给.
  */
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class UsageInfo {
 
+    @JsonProperty("prompt_tokens")
     private Integer promptTokens;
+    @JsonProperty("completion_tokens")
     private Integer completionTokens;
+    @JsonProperty("total_tokens")
     private Integer totalTokens;
 
     /** prompt 侧缓存命中 token (Anthropic / OpenAI 部分模型). */

@@ -1,13 +1,17 @@
 package com.zifang.z.llm.starter.autoconfig;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.z.llm.core.auth.AccessControl;
 import com.zifang.z.llm.core.credential.ApiKeyService;
 import com.zifang.z.llm.core.properties.GatewayProperties;
 import com.zifang.z.llm.core.registry.LlmCredentialStore;
 import com.zifang.z.llm.core.registry.LlmProviderRegistry;
+import com.zifang.z.llm.core.resilience.ProviderInvoker;
+import com.zifang.z.llm.core.router.ModelRouter;
 import com.zifang.z.llm.core.service.ChatGatewayService;
 import com.zifang.z.llm.core.service.RateLimiter;
-import org.springframework.beans.factory.annotation.Autowired;
+import com.zifang.z.llm.core.usage.UsageLedger;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -54,16 +58,44 @@ public class ZLlmAutoConfiguration {
     }
 
     @Bean
-    public ChatGatewayService chatGatewayService(LlmProviderRegistry registry,
-                                                 LlmCredentialStore credentialStore) {
-        return new ChatGatewayService(registry, credentialStore);
+    public ModelRouter modelRouter(LlmProviderRegistry registry, GatewayProperties properties) {
+        return new ModelRouter(registry, properties);
     }
 
-    /**
-     * 注入 ObjectMapper (确保 Spring Boot 的 JSON 序列化器能被 controller 复用).
-     */
-    @Autowired(required = false)
-    public void setObjectMapper(ObjectMapper objectMapper) {
-        // noop — Spring Boot 默认会注册 ObjectMapper bean, controller 通过构造注入即可
+    @Bean
+    public ProviderInvoker providerInvoker(GatewayProperties properties,
+                                           LlmProviderRegistry registry,
+                                           LlmCredentialStore credentialStore) {
+        return new ProviderInvoker(properties, registry, credentialStore);
+    }
+
+    @Bean
+    public UsageLedger usageLedger(GatewayProperties properties) {
+        return new UsageLedger(properties);
+    }
+
+    @Bean
+    public AccessControl accessControl(GatewayProperties properties) {
+        return new AccessControl(properties);
+    }
+
+    @Bean
+    public ChatGatewayService chatGatewayService(LlmProviderRegistry registry,
+                                                 LlmCredentialStore credentialStore,
+                                                 ModelRouter router,
+                                                 ProviderInvoker invoker,
+                                                 UsageLedger usageLedger,
+                                                 RateLimiter rateLimiter,
+                                                 AccessControl accessControl,
+                                                 GatewayProperties properties) {
+        return new ChatGatewayService(registry, credentialStore, router, invoker,
+                usageLedger, rateLimiter, accessControl, properties);
+    }
+
+    /** ObjectMapper 由 Spring Boot 默认注册; 无 web-json 的容器下兜一个, 保证 controller 构造注入不断. */
+    @Bean
+    @ConditionalOnMissingBean(ObjectMapper.class)
+    public ObjectMapper zLlmObjectMapper() {
+        return new ObjectMapper();
     }
 }

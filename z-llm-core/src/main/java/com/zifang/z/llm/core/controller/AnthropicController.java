@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.zifang.z.llm.api.dto.ApiKey;
 import com.zifang.z.llm.api.dto.Choice;
+import com.zifang.z.llm.api.dto.UnifiedMessage;
 import com.zifang.z.llm.api.dto.UnifiedRequest;
 import com.zifang.z.llm.api.dto.UnifiedResponse;
 import com.zifang.z.llm.api.dto.UnifiedStreamChunk;
@@ -29,11 +30,16 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Anthropic Messages API 协议兼容端点.
  *
- * <p>POST /v1/messages — 与 Anthropic 官方 Messages API 对齐.
+ * <p>POST /v1/messages              — 与 Anthropic 官方 Messages API 对齐 (含流式).
+ * <p>POST /v1/messages/count_tokens — Claude Code / Agent SDK 会先调它做上下文预算,
+ *                                     端点不存在会让客户端直接报错.
+ *
  * <p>model 字段: 接受 "claude-3-5-sonnet-latest" 或 "anthropic/claude-3-5-sonnet-latest" 两种写法.
  */
 @RestController
@@ -57,143 +63,267 @@ public class AnthropicController {
         this.mapper = new AnthropicRequestMapper();
     }
 
-    @PostMapping(value = "/messages",
-            consumes = MediaType.APPLICATION_JSON_VALUE,
-            produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<?> messages(@RequestBody JsonNode body,
-                                      @RequestHeader(value = "anthropic-version", required = false) String apiVersion,
-                                      HttpServletRequest req) {
+    @PostMapping(value = "/messages", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public void messages(@RequestBody JsonNode body,
+                         @RequestHeader(value = "anthropic-version", required = false) String apiVersion,
+                         HttpServletRequest req,
+                         HttpServletResponse resp) throws IOException {
         ApiKey key = AuthorizationExtractor.requireApiKey(req, apiKeyService);
-        if (!rateLimiter.tryAcquire(key)) {
-            throw GatewayException.rateLimited("Rate limit exceeded");
+        acquireOrThrow(key, resp);
+        try {
+            UnifiedRequest unified = normalize(mapper.parse(body));
+            boolean stream = Boolean.TRUE.equals(unified.getStream()) || isStreamQueryParam(req);
+            if (stream) {
+                streamMessages(unified, apiVersion, key, resp);
+            } else {
+                UnifiedResponse r = gateway.chat(unified, key).response();
+                resp.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                resp.setCharacterEncoding("UTF-8");
+                resp.getWriter().write(json.writeValueAsString(toAnthropicResponse(r, apiVersion, 0L)));
+                resp.getWriter().flush();
+            }
+        } finally {
+            rateLimiter.release(key);
         }
-        UnifiedRequest unified = mapper.parse(body);
-        // 兜底: 若用户传 "claude-3-5-sonnet-latest" 不带 vendor 前缀, 自动补 anthropic/
-        if (unified.getModel() != null && !unified.getModel().contains("/")) {
-            unified.setModel("anthropic/" + unified.getModel());
-        }
-        UnifiedResponse resp = gateway.chat(unified);
-        return ResponseEntity.ok().body(toAnthropicResponse(resp, apiVersion));
     }
 
-    @PostMapping(value = "/messages",
-            consumes = MediaType.APPLICATION_JSON_VALUE,
-            params = "stream=true",
-            produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public void streamMessages(@RequestBody JsonNode body,
-                               @RequestHeader(value = "anthropic-version", required = false) String apiVersion,
-                               HttpServletRequest req,
-                               HttpServletResponse resp) throws IOException {
-        ApiKey key = AuthorizationExtractor.requireApiKey(req, apiKeyService);
-        if (!rateLimiter.tryAcquire(key)) {
-            throw GatewayException.rateLimited("Rate limit exceeded");
+    /**
+     * token 计数 (估算).
+     *
+     * <p>网关这层没有各 vendor 的 tokenizer, 因此按 "约 4 字符 = 1 token" 估算,
+     * 并在响应里以 {@code estimate=true} 明示 —— 宁可给出带标记的近似值,
+     * 也不要让只依赖"端点存在"的客户端拿不到任何预算信号.
+     */
+    @PostMapping(value = "/messages/count_tokens", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<ObjectNode> countTokens(@RequestBody JsonNode body) {
+        UnifiedRequest unified = normalize(mapper.parse(body));
+        long chars = textLen(unified.getMessages());
+        if (body.has("system")) {
+            chars += body.get("system").toString().length();
         }
-        UnifiedRequest unified = mapper.parse(body);
-        if (unified.getModel() != null && !unified.getModel().contains("/")) {
-            unified.setModel("anthropic/" + unified.getModel());
+        if (body.has("tools")) {
+            chars += body.get("tools").toString().length();
         }
-        unified.setStream(true);
+        ObjectNode root = json.createObjectNode();
+        ObjectNode usage = root.putObject("usage");
+        long inputTokens = (long) Math.ceil(chars / 4.0);
+        usage.put("input_tokens", inputTokens);
+        usage.put("cache_creation_input_tokens", 0);
+        usage.put("cache_read_input_tokens", 0);
+        usage.put("output_tokens", 0);
+        root.put("estimate", true);
+        return ResponseEntity.ok(root);
+    }
 
+    // ---- 流式: 严格对齐 Anthropic 的事件帧序 ----
+
+    private void streamMessages(UnifiedRequest unified, String apiVersion, ApiKey key,
+                                HttpServletResponse resp) throws IOException {
         resp.setContentType(MediaType.TEXT_EVENT_STREAM_VALUE);
         resp.setCharacterEncoding("UTF-8");
         resp.setHeader(HttpHeaders.CACHE_CONTROL, "no-cache");
         resp.setHeader("X-Accel-Buffering", "no");
 
-        PrintWriter writer = resp.getWriter();
-        String messageId = "msg_" + System.currentTimeMillis();
-        writeAnthropicEvent(writer, "message_start",
-                buildMessageStart(messageId, unified.getModel()));
-        gateway.streamChat(unified,
+        final PrintWriter writer = resp.getWriter();
+        final String messageId = "msg_" + System.currentTimeMillis();
+        // 帧序要求: message_start → content_block_start → [delta...] → content_block_stop
+        //          → message_delta(stop_reason, usage) → message_stop.
+        // 此前每个增量都重发一对 start/stop, 客户端会看到无数个空文本块.
+        final AtomicBoolean blockOpened = new AtomicBoolean(false);
+        final AtomicBoolean blockClosed = new AtomicBoolean(false);
+        final AtomicBoolean finished = new AtomicBoolean(false);
+        final long[] outputTokens = new long[1];
+        final String[] stopReason = new String[1];
+
+        writeAnthropicEvent(writer, "message_start", buildMessageStart(messageId, unified.getModel(), apiVersion));
+        writeAnthropicEvent(writer, "ping", json.createObjectNode().put("type", "ping"));
+
+        Runnable closeBlock = () -> {
+            if (blockOpened.get() && blockClosed.compareAndSet(false, true)) {
+                writeAnthropicEvent(writer, "content_block_stop", json.createObjectNode().put("index", 0));
+            }
+        };
+        Runnable finish = () -> {
+            if (finished.compareAndSet(false, true)) {
+                closeBlock.run();
+                ObjectNode md = json.createObjectNode();
+                ObjectNode delta = json.createObjectNode();
+                delta.put("stop_reason", stopReason[0] == null ? "end_turn" : mapFinish(stopReason[0]));
+                delta.put("stop_sequence", json.nullNode());
+                md.set("delta", delta);
+                ObjectNode usage = json.createObjectNode();
+                usage.put("output_tokens", outputTokens[0]);
+                md.set("usage", usage);
+                writeAnthropicEvent(writer, "message_delta", md);
+                writeAnthropicEvent(writer, "message_stop", json.createObjectNode());
+                writer.flush();
+            }
+        };
+
+        gateway.streamChat(unified, key,
                 chunk -> {
-                    if (chunk.getChoices() != null) {
-                        for (Choice c : chunk.getChoices()) {
-                            if (c.getDelta() == null) continue;
-                            // content_block_start
+                    String text = textOf(chunk);
+                    if (text != null && !text.isEmpty()) {
+                        if (blockOpened.compareAndSet(false, true)) {
                             ObjectNode blockStart = json.createObjectNode();
                             ObjectNode block = json.createObjectNode();
                             block.put("type", "text");
                             block.put("text", "");
+                            blockStart.put("index", 0);
                             blockStart.set("content_block", block);
-                            blockStart.put("index", c.getIndex());
                             writeAnthropicEvent(writer, "content_block_start", blockStart);
-
-                            // content_block_delta
-                            if (c.getDelta().getContent() != null && !c.getDelta().getContent().isEmpty()) {
-                                ObjectNode delta = json.createObjectNode();
-                                delta.put("type", "text_delta");
-                                delta.put("text", c.getDelta().getContent());
-                                ObjectNode blockDelta = json.createObjectNode();
-                                blockDelta.put("index", c.getIndex());
-                                blockDelta.set("delta", delta);
-                                writeAnthropicEvent(writer, "content_block_delta", blockDelta);
-                            }
-
-                            // content_block_stop
-                            ObjectNode stop = json.createObjectNode();
-                            stop.put("index", c.getIndex());
-                            writeAnthropicEvent(writer, "content_block_stop", stop);
                         }
+                        ObjectNode delta = json.createObjectNode();
+                        delta.put("type", "text_delta");
+                        delta.put("text", text);
+                        ObjectNode blockDelta = json.createObjectNode();
+                        blockDelta.put("index", 0);
+                        blockDelta.set("delta", delta);
+                        writeAnthropicEvent(writer, "content_block_delta", blockDelta);
+                        outputTokens[0] += Math.max(1L, (long) Math.ceil(text.length() / 4.0));
+                    }
+                    String fr = finishReasonOf(chunk);
+                    if (fr != null) {
+                        stopReason[0] = fr;
                     }
                 },
                 err -> {
                     log.error("anthropic stream error", err);
-                    try {
-                        writeAnthropicEvent(writer, "error", json.createObjectNode().put("message",
-                                err.getMessage() == null ? "stream error" : err.getMessage()));
-                    } catch (Exception ignore) {}
+                    if (!finished.get()) {
+                        finished.set(true);
+                        closeBlock.run();
+                        writeAnthropicEvent(writer, "error", json.createObjectNode()
+                                .put("type", "error")
+                                .put("message", err.getMessage() == null ? "stream error" : err.getMessage()));
+                        writer.flush();
+                    }
                 },
-                () -> {
-                    // message_delta with stop_reason
-                    ObjectNode md = json.createObjectNode();
-                    ObjectNode delta = json.createObjectNode();
-                    delta.put("stop_reason", "end_turn");
-                    md.set("delta", delta);
-                    md.put("type", "message_delta");
-                    writeAnthropicEvent(writer, "message_delta", md);
-                    // message_stop
-                    writeAnthropicEvent(writer, "message_stop", json.createObjectNode());
-                    writer.flush();
-                });
+                finish);
+        finish.run();
     }
 
-    // ---- Anthropic 协议响应序列化 ----
+    // ---- helpers ----
 
-    private JsonNode toAnthropicResponse(UnifiedResponse resp, String apiVersion) {
+    private UnifiedRequest normalize(UnifiedRequest unified) {
+        if (unified != null && unified.getModel() != null && !unified.getModel().contains("/")) {
+            unified.setModel("anthropic/" + unified.getModel());
+        }
+        return unified;
+    }
+
+    private static String textOf(UnifiedStreamChunk chunk) {
+        if (chunk == null || chunk.getChoices() == null) {
+            return null;
+        }
+        for (Choice c : chunk.getChoices()) {
+            if (c != null && c.getDelta() != null && c.getDelta().getContent() != null) {
+                return c.getDelta().getContent();
+            }
+        }
+        return null;
+    }
+
+    private static String finishReasonOf(UnifiedStreamChunk chunk) {
+        if (chunk == null || chunk.getChoices() == null) {
+            return null;
+        }
+        for (Choice c : chunk.getChoices()) {
+            if (c != null && c.getFinishReason() != null && !c.getFinishReason().isEmpty()) {
+                return c.getFinishReason();
+            }
+        }
+        return null;
+    }
+
+    private static long textLen(List<UnifiedMessage> msgs) {
+        long n = 0L;
+        if (msgs == null) {
+            return 0L;
+        }
+        for (UnifiedMessage m : msgs) {
+            if (m == null) {
+                continue;
+            }
+            if (m.getContent() != null) {
+                n += m.getContent().length();
+            }
+            if (m.getContents() != null) {
+                for (com.zifang.z.llm.api.dto.ContentPart p : m.getContents()) {
+                    if (p != null && p.getText() != null) {
+                        n += p.getText().length();
+                    }
+                }
+            }
+        }
+        return n;
+    }
+
+    private void acquireOrThrow(ApiKey key, HttpServletResponse resp) {
+        if (!rateLimiter.tryAcquire(key)) {
+            long waitMs = rateLimiter.retryAfterMs(key);
+            resp.setHeader(HttpHeaders.RETRY_AFTER, String.valueOf(Math.max(1L, waitMs / 1000L)));
+            throw GatewayException.rateLimited("Rate limit exceeded");
+        }
+    }
+
+    private static boolean isStreamQueryParam(HttpServletRequest req) {
+        String p = req.getParameter("stream");
+        return p != null && ("true".equalsIgnoreCase(p) || "1".equals(p));
+    }
+
+    private JsonNode toAnthropicResponse(UnifiedResponse resp, String apiVersion, long inputTokens) {
         ObjectNode root = json.createObjectNode();
         root.put("id", resp.getId() == null ? "msg_" + System.currentTimeMillis() : resp.getId());
         root.put("type", "message");
         root.put("role", "assistant");
         root.put("model", resp.getModel());
-        if (apiVersion != null) root.put("anthropic_version", apiVersion);
+        if (apiVersion != null) {
+            root.put("anthropic_version", apiVersion);
+        }
 
-        // content 数组
         com.fasterxml.jackson.databind.node.ArrayNode contentArr = json.createArrayNode();
-        if (resp.getChoices() != null) {
-            for (Choice c : resp.getChoices()) {
-                ObjectNode block = json.createObjectNode();
-                block.put("type", "text");
-                block.put("text", c.getMessage() == null ? "" : c.getMessage().getContent());
-                contentArr.add(block);
+        StringBuilder text = new StringBuilder();
+        for (Choice c : safe(resp.getChoices())) {
+            if (c.getMessage() == null || c.getMessage().getContent() == null) {
+                continue;
             }
+            text.append(c.getMessage().getContent());
+        }
+        if (text.length() > 0 || contentArr.size() == 0) {
+            ObjectNode block = json.createObjectNode();
+            block.put("type", "text");
+            block.put("text", text.toString());
+            contentArr.add(block);
         }
         root.set("content", contentArr);
 
-        // stop_reason
         String stop = null;
-        if (resp.getChoices() != null && !resp.getChoices().isEmpty()) {
-            stop = resp.getChoices().get(0).getFinishReason();
+        List<Choice> choices = resp.getChoices();
+        if (choices != null && !choices.isEmpty()) {
+            stop = choices.get(0).getFinishReason();
         }
         root.put("stop_reason", stop == null ? "end_turn" : mapFinish(stop));
-        root.put("stop_sequence", json.nullNode());
+        root.putNull("stop_sequence");
 
-        // usage
         ObjectNode usage = json.createObjectNode();
+        long in = inputTokens;
+        long out = 0L;
         if (resp.getUsage() != null) {
-            usage.put("input_tokens", resp.getUsage().getPromptTokens() == null ? 0 : resp.getUsage().getPromptTokens());
-            usage.put("output_tokens", resp.getUsage().getCompletionTokens() == null ? 0 : resp.getUsage().getCompletionTokens());
+            if (resp.getUsage().getPromptTokens() != null) {
+                in = resp.getUsage().getPromptTokens();
+            }
+            if (resp.getUsage().getCompletionTokens() != null) {
+                out = resp.getUsage().getCompletionTokens();
+            }
         }
+        usage.put("input_tokens", in);
+        usage.put("output_tokens", out);
         root.set("usage", usage);
         return root;
+    }
+
+    private static List<Choice> safe(List<Choice> in) {
+        return in == null ? java.util.Collections.<Choice>emptyList() : in;
     }
 
     private static String mapFinish(String s) {
@@ -204,18 +334,27 @@ public class AnthropicController {
         return s;
     }
 
-    private ObjectNode buildMessageStart(String messageId, String model) {
+    private ObjectNode buildMessageStart(String messageId, String model, String apiVersion) {
         ObjectNode msg = json.createObjectNode();
         msg.put("id", messageId);
         msg.put("type", "message");
         msg.put("role", "assistant");
         msg.put("model", model == null ? "" : model);
-        ObjectNode content = json.createObjectNode();
-        content.put("type", "text");
-        content.put("text", "");
+        if (apiVersion != null) {
+            msg.put("anthropic_version", apiVersion);
+        }
+        com.fasterxml.jackson.databind.node.ArrayNode content = json.createArrayNode();
+        ObjectNode block = json.createObjectNode();
+        block.put("type", "text");
+        block.put("text", "");
+        content.add(block);
         msg.set("content", content);
-        msg.put("stop_reason", json.nullNode());
-        msg.put("stop_sequence", json.nullNode());
+        msg.putNull("stop_reason");
+        msg.putNull("stop_sequence");
+        ObjectNode usage = json.createObjectNode();
+        usage.put("input_tokens", 0);
+        usage.put("output_tokens", 0);
+        msg.set("usage", usage);
         return msg;
     }
 

@@ -53,6 +53,12 @@
     </scm>
 
     <dependencies>
-        <!-- 纯 DTO, 无 Spring, 无 kernel 依赖, 业务可单独引用 -->
+        <!-- 只有注解, 无 Spring / 无 databind / 无 kernel 依赖, 业务仍可单独引用.
+             annotations 用来把响应 DTO 钉成 OpenAI 线格式 (finish_reason / prompt_tokens ...),
+             此前 DTO 直接按 Java 字段名出 JSON, 任何官方 SDK 都解析不了. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+        </dependency>
     </dependencies>
 </project>

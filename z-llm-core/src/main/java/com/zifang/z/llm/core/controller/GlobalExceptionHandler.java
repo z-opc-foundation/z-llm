@@ -35,8 +35,17 @@ public class GlobalExceptionHandler {
                 ex.getMessage(),
                 "upstream_error",
                 "upstream_failed");
-        return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                .body(er);
+        // 上游 4xx 是调用方或配置问题, 原样透出状态码; 只有 5xx/未知才归 502.
+        Integer status = ex.getHttpStatus();
+        HttpStatus out = HttpStatus.BAD_GATEWAY;
+        if (status != null) {
+            if (status == 429) {
+                out = HttpStatus.TOO_MANY_REQUESTS;
+            } else if (status >= 400 && status < 500) {
+                out = HttpStatus.valueOf(status);
+            }
+        }
+        return ResponseEntity.status(out).body(er);
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

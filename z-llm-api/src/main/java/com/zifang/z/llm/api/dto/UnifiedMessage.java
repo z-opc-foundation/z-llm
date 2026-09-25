@@ -1,5 +1,8 @@
 package com.zifang.z.llm.api.dto;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.List;
 
 /**
@@ -8,6 +11,7 @@ import java.util.List;
  * <p>role 取值: "system" / "user" / "assistant" / "tool".
  * <p>content 可以是纯文本 string, 也可以是 content parts 列表 (多模态).
  */
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class UnifiedMessage {
 
     /** 角色: system / user / assistant / tool. */
@@ -20,9 +24,11 @@ public class UnifiedMessage {
     private List<ContentPart> contents;
 
     /** assistant 角色回复的工具调用. */
+    @JsonProperty("tool_calls")
     private List<ToolCall> toolCalls;
 
     /** tool 角色消息关联的 tool_call id. */
+    @JsonProperty("tool_call_id")
     private String toolCallId;
 
     /** tool 角色消息关联的函数名 (OpenAI 协议). */

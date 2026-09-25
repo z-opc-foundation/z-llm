@@ -47,6 +47,16 @@ public class GatewayException extends RuntimeException {
         return new GatewayException(404, "model_not_found", "Model not found: " + model);
     }
 
+    /** 400 — 请求体不合法. */
+    public static GatewayException invalidRequest(String message) {
+        return new GatewayException(400, "invalid_request", message);
+    }
+
+    /** 413 — 请求体超限. */
+    public static GatewayException payloadTooLarge(String message) {
+        return new GatewayException(413, "payload_too_large", message);
+    }
+
     /** 429 — 限流. */
     public static GatewayException rateLimited(String message) {
         return new GatewayException(429, "rate_limited", message);

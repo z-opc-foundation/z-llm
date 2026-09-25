@@ -1,0 +1,297 @@
+package com.zifang.z.llm.core.resilience;
+
+import com.zifang.z.agent.kernel.llm.LlmProvider;
+import com.zifang.z.llm.api.dto.LlmCredential;
+import com.zifang.z.llm.api.dto.Vendor;
+import com.zifang.z.llm.api.exception.GatewayException;
+import com.zifang.z.llm.core.properties.GatewayProperties;
+import com.zifang.z.llm.core.registry.LlmCredentialStore;
+import com.zifang.z.llm.core.registry.LlmProviderRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
+
+/**
+ * 凭据池调用器 — 同一 vendor 内跨凭据 failover + 冷却.
+ *
+ * <p>对标 LiteLLM router 的 cooldown 与 one-api 的渠道自动禁用:
+ * 一个 AK 被打爆 (429) 或上游 5xx / 网络故障时, 该凭据进入冷却窗口,
+ * 请求自动改投同 vendor 的下一个凭据, 而不是把 429 直接抛给调用方.
+ *
+ * <p>4xx 中除 408/429 外属调用方或配置问题 (400 参数错 / 401 上游 key 失效),
+ * 换凭据无意义或需明确暴露, 因此 400 直接透出, 401/403 仍换凭据重试.
+ */
+public class ProviderInvoker {
+
+    private static final Logger log = LoggerFactory.getLogger(ProviderInvoker.class);
+
+    /** 一次可尝试的凭据句柄. */
+    public static final class Handle {
+        private final Vendor vendor;
+        private final String alias;
+        private final LlmProvider provider;
+
+        Handle(Vendor vendor, String alias, LlmProvider provider) {
+            this.vendor = vendor;
+            this.alias = alias;
+            this.provider = provider;
+        }
+
+        public Vendor vendor() {
+            return vendor;
+        }
+
+        public String alias() {
+            return alias;
+        }
+
+        public LlmProvider provider() {
+            return provider;
+        }
+
+        public String key() {
+            return vendor.code() + "::" + alias;
+        }
+    }
+
+    private static final class Stat {
+        final AtomicLong success = new AtomicLong();
+        final AtomicLong failure = new AtomicLong();
+        final AtomicLong cooldownHits = new AtomicLong();
+    }
+
+    private final GatewayProperties properties;
+    private final LlmProviderRegistry registry;
+    private final LlmCredentialStore credentialStore;
+
+    private final ConcurrentHashMap<String, Long> cooldownUntil = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Stat> stats = new ConcurrentHashMap<>();
+
+    public ProviderInvoker(GatewayProperties properties,
+                          LlmProviderRegistry registry,
+                          LlmCredentialStore credentialStore) {
+        this.properties = properties;
+        this.registry = registry;
+        this.credentialStore = credentialStore;
+    }
+
+    /** 本次请求在该 vendor 上最多尝试几个凭据. */
+    public int attemptsFor(Vendor vendor) {
+        GatewayProperties.Retry r = properties.getRetry();
+        if (!r.isEnabled()) {
+            return 1;
+        }
+        return Math.max(1, r.getMaxAttempts());
+    }
+
+    /** failover 用的候选池 (含冷却兜底). */
+    public List<Handle> candidatesForFailover(Vendor vendor) {
+        return properties.getRetry().isEnabled()
+                ? candidatesWithOverflow(vendor)
+                : candidates(vendor);
+    }
+
+    /** 按 priority 返回该 vendor 当前可用 (未冷却) 的凭据句柄. */
+    public List<Handle> candidates(Vendor vendor) {
+        List<Handle> out = new ArrayList<>();
+        long now = System.currentTimeMillis();
+        for (LlmCredential cred : credentialStore.findByVendor(vendor)) {
+            LlmProvider p = registry.get(vendor, cred.getAlias());
+            if (p == null) {
+                continue;
+            }
+            Handle h = new Handle(vendor, cred.getAlias(), p);
+            Long until = cooldownUntil.get(h.key());
+            if (until != null && until > now) {
+                stat(h.key()).cooldownHits.incrementAndGet();
+                continue;
+            }
+            out.add(h);
+        }
+        return out;
+    }
+
+    /** 全池为空时把冷却最浅的凭据放出来兜底, 避免一次限流让整个 vendor 拒绝服务. */
+    public List<Handle> candidatesWithOverflow(Vendor vendor) {
+        List<Handle> available = candidates(vendor);
+        if (!available.isEmpty()) {
+            return available;
+        }
+        List<Handle> all = new ArrayList<>();
+        for (LlmCredential cred : credentialStore.findByVendor(vendor)) {
+            LlmProvider p = registry.get(vendor, cred.getAlias());
+            if (p != null) {
+                all.add(new Handle(vendor, cred.getAlias(), p));
+            }
+        }
+        if (!all.isEmpty()) {
+            log.warn("vendor {} has all {} credentials cooling off, serving from cooldown pool",
+                    vendor.code(), all.size());
+        }
+        return all;
+    }
+
+    /**
+     * 带 failover 的执行. body 抛出的异常按可重试性决定是否换下一个凭据.
+     *
+     * @param attemptsCap 本次最多尝试几个凭据 (含首个)
+     */
+    public <T> T execute(Vendor vendor, int attemptsCap, Function<Handle, T> body) {
+        GatewayProperties.Retry retry = properties.getRetry();
+        List<Handle> pool = retry.isEnabled() ? candidatesWithOverflow(vendor) : candidatesOrSingle(vendor);
+        if (pool.isEmpty()) {
+            throw GatewayException.internal("No active credential for vendor " + vendor, null);
+        }
+        int max = retry.isEnabled() ? Math.max(1, Math.min(attemptsCap, pool.size())) : 1;
+        Throwable last = null;
+        int tried = 0;
+        for (int i = 0; i < max; i++) {
+            Handle h = pool.get(i);
+            tried++;
+            try {
+                T result = body.apply(h);
+                reportSuccess(h);
+                return result;
+            } catch (Throwable t) {
+                last = t;
+                if (!retryable(t)) {
+                    throw propagate(t);
+                }
+                reportFailure(h, t);
+                sleepBackoff(retry, i);
+            }
+        }
+        throw GatewayException.upstreamFailed(
+                "All " + tried + " credential(s) of vendor " + vendor.code() + " failed: "
+                        + (last == null ? "unknown" : last.getMessage()), last);
+    }
+
+    private List<Handle> candidatesOrSingle(Vendor vendor) {
+        List<Handle> available = candidates(vendor);
+        if (!available.isEmpty()) {
+            return available;
+        }
+        // 限流关闭时仍要能服务 (只取 priority 首个, 不看冷却).
+        return candidatesWithOverflow(vendor);
+    }
+
+    /** 该异常是否值得换一个凭据重试. */
+    public static boolean retryable(Throwable t) {
+        Integer status = httpStatusOf(t);
+        if (status != null) {
+            if (status == 429 || status == 401 || status == 403) {
+                return true;
+            }
+            return status >= 500;
+        }
+        // 无 HTTP 状态 ⇒ 连接/超时/解析类故障, 换凭据有意义.
+        return t instanceof RuntimeException || t instanceof java.io.IOException;
+    }
+
+    public static Integer httpStatusOf(Throwable t) {
+        if (t instanceof com.zifang.z.agent.kernel.llm.support.LlmException) {
+            return ((com.zifang.z.agent.kernel.llm.support.LlmException) t).getHttpStatus();
+        }
+        if (t instanceof GatewayException) {
+            int s = ((GatewayException) t).getHttpStatus();
+            return s > 0 ? s : null;
+        }
+        Throwable c = t.getCause();
+        return c == null || c == t ? null : httpStatusOf(c);
+    }
+
+    private static RuntimeException propagate(Throwable t) {
+        if (t instanceof GatewayException) {
+            throw (GatewayException) t;
+        }
+        if (t instanceof RuntimeException) {
+            throw (RuntimeException) t;
+        }
+        throw GatewayException.upstreamFailed(t.getMessage(), t);
+    }
+
+    public void reportSuccess(Handle h) {
+        cooldownUntil.remove(h.key());
+        stat(h.key()).success.incrementAndGet();
+    }
+
+    public void reportFailure(Handle h, Throwable t) {
+        stat(h.key()).failure.incrementAndGet();
+        long until = System.currentTimeMillis() + properties.getRetry().getCooldownMs();
+        Long prev = cooldownUntil.putIfAbsent(h.key(), until);
+        if (prev != null) {
+            cooldownUntil.put(h.key(), until);
+        }
+        log.warn("credential {} failed ({}), cooling off for {} ms",
+                h.key(), t.getMessage(), properties.getRetry().getCooldownMs());
+    }
+
+    public boolean inCooldown(Handle h) {
+        Long until = cooldownUntil.get(h.key());
+        return until != null && until > System.currentTimeMillis();
+    }
+
+    public void clearCooldowns() {
+        cooldownUntil.clear();
+    }
+
+    /** 供 admin/metrics 暴露的凭据健康快照. */
+    public Map<String, Object> snapshot() {
+        long now = System.currentTimeMillis();
+        Map<String, Object> out = new LinkedHashMap<>();
+        Iterator<Map.Entry<String, Long>> it = cooldownUntil.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<String, Long> e = it.next();
+            if (e.getValue() <= now) {
+                it.remove();
+            }
+        }
+        Map<String, Object> cooldown = new LinkedHashMap<>();
+        for (Map.Entry<String, Long> e : cooldownUntil.entrySet()) {
+            cooldown.put(e.getKey(), e.getValue() - now);
+        }
+        out.put("coolingDown", cooldown);
+        Map<String, Object> perKey = new LinkedHashMap<>();
+        for (Map.Entry<String, Stat> e : stats.entrySet()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("success", e.getValue().success.get());
+            row.put("failure", e.getValue().failure.get());
+            row.put("cooldownSkips", e.getValue().cooldownHits.get());
+            perKey.put(e.getKey(), row);
+        }
+        out.put("credentials", perKey);
+        return out;
+    }
+
+    private Stat stat(String key) {
+        Stat s = stats.get(key);
+        if (s == null) {
+            s = new Stat();
+            Stat existing = stats.putIfAbsent(key, s);
+            if (existing != null) {
+                s = existing;
+            }
+        }
+        return s;
+    }
+
+    private static void sleepBackoff(GatewayProperties.Retry retry, int attempt) {
+        long ms = retry.getBackoffMs() * (attempt + 1L);
+        if (ms <= 0) {
+            return;
+        }
+        try {
+            Thread.sleep(Math.min(ms, 5_000L));
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+    }
+}
