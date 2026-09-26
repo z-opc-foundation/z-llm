@@ -41,49 +41,54 @@ import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 @Import(ZLlmCoreScanConfig.class)
 public class ZLlmAutoConfiguration {
 
-    @Bean
+    /**
+     * bean name 统一加 zLlm 前缀：本 starter 的 bean 类型名都很通用
+     * （ApiKeyService、RateLimiter、UsageLedger…），默认 bean id 会和同一应用里的
+     *  z-script / z-team 等子模块同名 bean 撞车，导致应用启动即失败。
+     */
+    @Bean("zLlmCredentialStore")
     public LlmCredentialStore llmCredentialStore(GatewayProperties properties) {
         return new LlmCredentialStore(properties);
     }
 
-    @Bean
+    @Bean("zLlmProviderRegistry")
     public LlmProviderRegistry llmProviderRegistry(LlmCredentialStore credentialStore) {
         return new LlmProviderRegistry(credentialStore);
     }
 
-    @Bean
+    @Bean("zLlmApiKeyService")
     public ApiKeyService apiKeyService(GatewayProperties properties) {
         return new ApiKeyService(properties);
     }
 
-    @Bean
+    @Bean("zLlmRateLimiter")
     public RateLimiter rateLimiter(GatewayProperties properties) {
         return new RateLimiter(properties);
     }
 
-    @Bean
+    @Bean("zLlmModelRouter")
     public ModelRouter modelRouter(LlmProviderRegistry registry, GatewayProperties properties) {
         return new ModelRouter(registry, properties);
     }
 
-    @Bean
+    @Bean("zLlmProviderInvoker")
     public ProviderInvoker providerInvoker(GatewayProperties properties,
                                            LlmProviderRegistry registry,
                                            LlmCredentialStore credentialStore) {
         return new ProviderInvoker(properties, registry, credentialStore);
     }
 
-    @Bean
+    @Bean("zLlmUsageLedger")
     public UsageLedger usageLedger(GatewayProperties properties) {
         return new UsageLedger(properties);
     }
 
-    @Bean
+    @Bean("zLlmAccessControl")
     public AccessControl accessControl(GatewayProperties properties) {
         return new AccessControl(properties);
     }
 
-    @Bean
+    @Bean("zLlmUpstreamHttp")
     @ConditionalOnMissingBean(UpstreamHttp.class)
     public UpstreamHttp upstreamHttp(GatewayProperties properties) {
         return new LlmHttpUpstream(properties.getUpstreamConnectTimeoutSec(),
@@ -91,7 +96,7 @@ public class ZLlmAutoConfiguration {
     }
 
     /** 带图片的请求绕过 kernel provider 直连上游 (provider 传不了多模态). */
-    @Bean
+    @Bean("zLlmMultimodalChatRelay")
     public MultimodalChatRelay multimodalChatRelay(LlmCredentialStore credentialStore,
                                                     ProviderInvoker invoker,
                                                     UsageLedger usageLedger,
@@ -100,7 +105,7 @@ public class ZLlmAutoConfiguration {
         return new MultimodalChatRelay(credentialStore, invoker, usageLedger, rateLimiter, upstreamHttp);
     }
 
-    @Bean
+    @Bean("zLlmEmbeddingService")
     public EmbeddingService embeddingService(GatewayProperties properties,
                                              LlmCredentialStore credentialStore,
                                              ModelRouter router,
@@ -113,7 +118,7 @@ public class ZLlmAutoConfiguration {
                 usageLedger, rateLimiter, accessControl, upstreamHttp);
     }
 
-    @Bean
+    @Bean("zLlmChatGatewayService")
     public ChatGatewayService chatGatewayService(LlmProviderRegistry registry,
                                                  LlmCredentialStore credentialStore,
                                                  ModelRouter router,

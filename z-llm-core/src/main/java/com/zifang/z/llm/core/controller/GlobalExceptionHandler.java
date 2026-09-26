@@ -7,12 +7,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 
 /**
  * 网关全局异常处理 — 把 GatewayException / LlmException 转为带正确 HTTP 状态码的 ErrorResponse.
+ * <p>Spring 默认按类名首字母小写注册 bean id="globalExceptionHandler"，
+ * 会与 z-config-web/z-team-web 等子项目的同名 ControllerAdvice 冲突。
+ * 用显式 @Component("zLlmGlobalExceptionHandler") 给个独立 bean name，
+ * Spring MVC 会按 @ExceptionHandler 的最具体类型自动合并所有 handler。
  */
+@Component("zLlmGlobalExceptionHandler")
 @ControllerAdvice
 public class GlobalExceptionHandler {
 
