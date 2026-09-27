@@ -309,3 +309,28 @@ mvn -B -Dmaven.repo.local=/tmp/m2-central-check dependency:get \
 - ApiKey 与凭据目前来自配置文件，动态刷新（接 zk-config）未做
 - 限流桶是单实例内存态
 - `dashscope` / `gemini` 的图片不在转发面内（会明确报 400，不静默降级）
+- **body 定性不了的输入错误现在回 500，不是 400**（0.1.5 实测，探针日志
+  `~/.cache/zllm-40-probe/probe.log`；探针是临时加在 `GatewayHttpProtocolTest` 上跑完还原的，
+  md5 回读 `544a3ada2e3a35be677c7bd2e4d7a30c` 与改前一致）：
+  `POST /v1/chat/completions` 三形态 —— body 截断 `{"model":` / body 全空 / body 是 `hello` ——
+  全部 `status=500 type=internal_error code=internal`；而**进了 controller 之后**的校验
+  （`{"model":"openai/gpt-4o"}` 缺 `messages`）是对的 `400 invalid_request`。
+  差的就是 mapping/反序列化这一层：`GlobalExceptionHandler` 只挂了
+  `GatewayException` / `LlmException` / `IllegalArgumentException` / `Exception` 四个
+  `@ExceptionHandler`，`HttpMessageNotReadableException` 直接落到 `Exception` 兑底。
+  为什么算缺陷而不是"反正有信封"：OpenAI 兼容客户端把 4xx 判成"我的请求坏了、不重试"、
+  把 5xx 判成"服务端坏了、退避后重试"，回 500 等于让客户端拿一个永远坏的重试。
+  顺带一条：**空 body 那条的 message 把 controller 方法签名原样吐给调用方**
+  （`Required request body is missing: public void ...OpenAIController.chatCompletions(...)`）。
+  修它要发 0.1.6（发布需点头）。
+- **网关路径上 mapping 阶段的 404/405 不归本库管**（结构性，不是漏改）：0.1.5 把 advice 收窄成
+  只管 `com.zifang.z.llm.core.controller` / `com.zifang.z.llm.admin.controller` 两个包，而
+  405（`HttpRequestMethodNotSupportedException`）这类异常的归属判定在 handler 之前，
+  不在那两个包里 ⇒ 网关 advice 结构上碰不到它。合并进程里此时唯一还接得住的是
+  z-config-web 那份**裸 `@ControllerAdvice` + `@ExceptionHandler(Exception.class)`**
+  （从已发布件字节判出：`javap -v` 读 `z-config-web-1.0.8.jar` 里的
+  `com/zifang/z/config/web/config/GlobalExceptionHandler.class`，类级注解是 `#90()` 零元素，
+  且没有任何 `basePackages` 常量），它给的是 `com.zifang.util.core.meta.Result` 信封，不是
+  `{"error":{...}}`。⚠ 这条只证到"谁在接"，**没有**跑合并进程拍过 405 的实际响应体。
+  要收只有一条路：宿主或 z-config 侧给那份 advice 限定包名 / 抬 order，不在本库范围内。
+
