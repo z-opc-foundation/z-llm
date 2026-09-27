@@ -146,6 +146,23 @@ Anthropic 面另有两条原生约定：`system` 上提为顶层字段，`tool_r
 
 错误响应体：`{"error":{"message","type","code","param"}}`。
 
+### 与宿主应用同 JVM 时（0.1.5 起的两条契约）
+
+上表那套状态码只在异常真的落到本类头上时成立。合并进程里有两个坑，0.1.5 各钉了一条：
+
+- **bean 名带 `zLlm` 前缀**（`@Component("zLlmGlobalExceptionHandler")` + 13 个 `@Bean` 同名前缀）。
+  Spring 默认按简单类名首字母小写注册，宿主或另一支 L3 库里只要有同名类，扫描期就
+  `ConflictingBeanDefinitionException` 直接起不来，且 `allow-bean-definition-overriding` 救不了。
+- **advice 限定 `basePackages` + `@Order(HIGHEST_PRECEDENCE)`**。Spring 解析异常时是按 advice 顺序
+  逐个问"你有没有这个异常的 handler"，**第一个命中的赢，不是全进程挑最具体的那个**。宿主常见的
+  `@RestControllerAdvice(basePackages = "com.zifang")` + `Exception` 兑底只要排在前面，就会把
+  网关的 429/400/502 压成 500 + 宿主自己的信封（z-opc 上实测过）。限定包名让本类只管
+  `com.zifang.z.llm.core.controller` / `com.zifang.z.llm.admin.controller` 两个包（不反向吃掉宿主语义），
+  抬 order 让网关自己的 controller 必定先命中本类。
+
+两条都由永久闸盯着：`MergedProcessAdvicePrecedenceTest`（真 `AnnotationConfigWebApplicationContext`，
+宿主替身 advice 先注册且不带 `@Order`）。`standaloneSetup` 那层结构上测不到这两个机制。
+
 ## 限流与记账
 
 按 ApiKey 维度同时限制三个口径：RPM（`requests-per-minute`）、TPM（`tokens-per-minute`）、并发数（`z.llm.max-concurrent-requests`）。
