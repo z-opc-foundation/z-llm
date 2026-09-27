@@ -5,6 +5,8 @@ import com.zifang.z.llm.api.dto.ErrorResponse;
 import com.zifang.z.llm.api.exception.GatewayException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
@@ -13,13 +15,25 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 
 /**
  * 网关全局异常处理 — 把 GatewayException / LlmException 转为带正确 HTTP 状态码的 ErrorResponse.
- * <p>Spring 默认按类名首字母小写注册 bean id="globalExceptionHandler"，
- * 会与 z-config-web/z-team-web 等子项目的同名 ControllerAdvice 冲突。
- * 用显式 @Component("zLlmGlobalExceptionHandler") 给个独立 bean name，
- * Spring MVC 会按 @ExceptionHandler 的最具体类型自动合并所有 handler。
+ *
+ * <p><b>bean 名必须显式给</b>：Spring 默认按简单类名首字母小写注册 id="globalExceptionHandler"，
+ * 与 z-config-web 的同名类撞车后合并进程直接 {@code ConflictingBeanDefinitionException} 起不来
+ * （z-team-web 那份同名 advice 也是靠 {@code @Component("teamGlobalExceptionHandler")} 躲开的）。
+ *
+ * <p><b>限定包名 + 最高优先级，二者缺一不可</b>：Spring 解析异常时是按 advice 顺序（{@code @Order}，
+ * 无序者退到 LOWEST_PRECEDENCE，再按注册序）逐个问"这个 advice 有没有该异常的 handler"，
+ * **第一个命中的 advice 赢，不是全进程最具体的 handler 赢**。宿主应用常带一个
+ * {@code @RestControllerAdvice(basePackages = "com.zifang")} + {@code Exception} 兑底，
+ * 它注册在前 ⇒ 会把本网关的 429/400/502 语义压成 500 + 宿主自己的信封。
+ * 限定 basePackages 让本 advice 只管 z-llm 自己的 controller（不吃别家语义），
+ * 提高 order 让它在这些 controller 上必定先于宿主命中。
  */
 @Component("zLlmGlobalExceptionHandler")
-@ControllerAdvice
+@ControllerAdvice(basePackages = {
+        "com.zifang.z.llm.core.controller",   // OpenAIController / AnthropicController（/v1/*）
+        "com.zifang.z.llm.admin.controller"   // AdminController（控制面同样吃本类的 ErrorResponse）
+})
+@Order(Ordered.HIGHEST_PRECEDENCE)
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
