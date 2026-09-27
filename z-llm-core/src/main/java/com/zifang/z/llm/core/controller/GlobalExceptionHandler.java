@@ -9,6 +9,7 @@ import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -66,6 +67,24 @@ public class GlobalExceptionHandler {
             }
         }
         return ResponseEntity.status(out).body(er);
+    }
+
+    /**
+     * body 在进 controller 之前就读坏了（截断 / 全空 / 不是 JSON）⇒ 400.
+     *
+     * <p>此前这一格落到下面的 {@code Exception} 兑底 ⇒ 500 + 把 Spring 原文吐给调用方
+     * （{@code Required request body is missing: public void ...OpenAIController.chatCompletions(...)}
+     * 连同 Jackson 与 {@code StreamUtils$NonClosingInputStream} 一起出去）.
+     * 500 会让 OpenAI 兼容客户端按"服务端坏了"退避重试一个永远坏的请求.
+     *
+     * <p>信封走 {@link #handleGateway} 这一条路，不在这里重抄 type/code 字面量;
+     * 细节只进 log（不打 body 本身, 那是用户的 prompt）.
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ErrorResponse> handleUnreadableBody(HttpMessageNotReadableException ex) {
+        log.warn("Unreadable request body: {}", ex.getMessage());
+        return handleGateway(GatewayException.invalidRequest(
+                "Request body is missing or could not be parsed as JSON"));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

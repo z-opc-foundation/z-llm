@@ -142,9 +142,11 @@ Anthropic 面另有两条原生约定：`system` 上提为顶层字段，`tool_r
 | 上游返回 4xx（除 429） | 原样透出该状态码 —— 是调用方或配置问题 |
 | 上游 429 | 429 |
 | 上游 5xx 或未知 | 502 |
+| **body 在读进 controller 之前就坏掉**（截断 / 全空 / 不是 JSON） | 400 `invalid_request`（0.1.6 起；此前是 500，见"已知边界"） |
 | **整个凭据池都被限流** | 429，不是笼统的 502 —— 客户端的正确动作是退避，把它压成 502 会诱导立刻重试 |
 
-错误响应体：`{"error":{"message","type","code","param"}}`。
+错误响应体：`{"error":{"message","type","code","param"}}`。对外 `message` 只放给人看的短句，
+异常原文（Spring 会把 controller 的方法签名、Jackson 的内部类名整段带出来）只进 log。
 
 ### 与宿主应用同 JVM 时（0.1.5 起的两条契约）
 
@@ -309,28 +311,31 @@ mvn -B -Dmaven.repo.local=/tmp/m2-central-check dependency:get \
 - ApiKey 与凭据目前来自配置文件，动态刷新（接 zk-config）未做
 - 限流桶是单实例内存态
 - `dashscope` / `gemini` 的图片不在转发面内（会明确报 400，不静默降级）
-- **body 定性不了的输入错误现在回 500，不是 400**（0.1.5 实测，探针日志
-  `~/.cache/zllm-40-probe/probe.log`；探针是临时加在 `GatewayHttpProtocolTest` 上跑完还原的，
-  md5 回读 `544a3ada2e3a35be677c7bd2e4d7a30c` 与改前一致）：
-  `POST /v1/chat/completions` 三形态 —— body 截断 `{"model":` / body 全空 / body 是 `hello` ——
-  全部 `status=500 type=internal_error code=internal`；而**进了 controller 之后**的校验
-  （`{"model":"openai/gpt-4o"}` 缺 `messages`）是对的 `400 invalid_request`。
-  差的就是 mapping/反序列化这一层：`GlobalExceptionHandler` 只挂了
-  `GatewayException` / `LlmException` / `IllegalArgumentException` / `Exception` 四个
-  `@ExceptionHandler`，`HttpMessageNotReadableException` 直接落到 `Exception` 兑底。
-  为什么算缺陷而不是"反正有信封"：OpenAI 兼容客户端把 4xx 判成"我的请求坏了、不重试"、
-  把 5xx 判成"服务端坏了、退避后重试"，回 500 等于让客户端拿一个永远坏的重试。
-  顺带一条：**空 body 那条的 message 把 controller 方法签名原样吐给调用方**
-  （`Required request body is missing: public void ...OpenAIController.chatCompletions(...)`）。
-  修它要发 0.1.6（发布需点头）。
-- **网关路径上 mapping 阶段的 404/405 不归本库管**（结构性，不是漏改）：0.1.5 把 advice 收窄成
-  只管 `com.zifang.z.llm.core.controller` / `com.zifang.z.llm.admin.controller` 两个包，而
-  405（`HttpRequestMethodNotSupportedException`）这类异常的归属判定在 handler 之前，
-  不在那两个包里 ⇒ 网关 advice 结构上碰不到它。合并进程里此时唯一还接得住的是
-  z-config-web 那份**裸 `@ControllerAdvice` + `@ExceptionHandler(Exception.class)`**
-  （从已发布件字节判出：`javap -v` 读 `z-config-web-1.0.8.jar` 里的
-  `com/zifang/z/config/web/config/GlobalExceptionHandler.class`，类级注解是 `#90()` 零元素，
-  且没有任何 `basePackages` 常量），它给的是 `com.zifang.util.core.meta.Result` 信封，不是
-  `{"error":{...}}`。⚠ 这条只证到"谁在接"，**没有**跑合并进程拍过 405 的实际响应体。
-  要收只有一条路：宿主或 z-config 侧给那份 advice 限定包名 / 抬 order，不在本库范围内。
+- ~~body 定性不了的输入错误回 500，不是 400~~ —— **0.1.6 已修**：advice 补了
+  `@ExceptionHandler(HttpMessageNotReadableException.class)`，五格（`/v1/chat/completions` 的截断 /
+  全空 / `hello`、`/v1/embeddings` 的 `{oops`、`/v1/messages` 的全空）从 `500 internal_error`
+  变 `400 gateway_error / invalid_request`，message 换成定句、Spring 原文只进 log。
+  （算缺陷而不是"反正有信封"：客户端把 4xx 判成"我的请求坏了、不重试"、把 5xx 判成"服务端坏了、
+  退避后重试"，回 500 等于让它拿一个永远坏的请求去重试。）
+  0.1.5 的 before 读数（14 格，含异常类名）留在 `~/.cache/zllm-40-probe/before-extended.log`。
+  永久闸：`GatewayHttpProtocolTest.malformedOrMissingBodyIs400AndDoesNotLeakInternals`
+  （三支具名变异各自点名转红：摘 handler → 状态码那批、`message` 换回 `ex.getMessage()` → 泄漏那批 16 条）。
+  顺带一条没修的既有行为：**未鉴权 + 坏 body 现在是 400 不是 401** —— body 解析发生在
+  controller 方法体之前，鉴权在方法体里，所以顺序改不动（要挪得先加 filter/interceptor），0.1.6 未做。
+- **网关路径上 mapping 阶段的 415/405/404 不归本库管**（结构性，不是漏改）：0.1.5 把 advice 收窄成
+  只管 `com.zifang.z.llm.core.controller` / `com.zifang.z.llm.admin.controller` 两个包，而这几类异常
+  由 `HandlerMapping` 抛出、那时 handler 还没定下来 ⇒ **带限定的 advice 一律不参与**。
+  0.1.6 把这个机制量成了四腿对照（永久闸
+  `GatewayHttpProtocolTest.mappingPhaseErrorsEvadePackageScopedAdvice`，四份 advice 的 handler 集合
+  逐字相同，唯一差别是类级限定）：裸 advice **接得到** 415/405（阳性腿，摘掉标记体它必红），
+  限定成本库 controller 所在包 ⇒ 接不到，限定成 `com.zifang`（宿主 z-opc 那份 advice 的写法）⇒ 也接不到。
+  所以合并进程里能接住 405 的只有**裸** advice —— z-config-web 那份正是这个形状
+  （`javap -v` 读已发布件 `z-config-web-1.0.8.jar` 里的
+  `com/zifang/z/config/web/config/GlobalExceptionHandler.class`：类级注解 `#90()` 零元素、
+  没有任何 `basePackages` 常量），它给的是 `com.zifang.util.core.meta.Result` 信封，不是
+  `{"error":{...}}`。⚠ 上面四腿是 MockMvc 层量到的**可达性**，**没有**跑合并进程拍过 405 的实际响应体。
+  未知路径另有一层：这一层根本没抛异常（404、空 body、`getResolvedException()` 为 null，同一条闸里钉着），
+  谈不上谁接得住。要收 405/415 只有一条路：宿主或 z-config 侧给那份裸 advice 限定包名 / 抬 order，
+  不在本库范围内 —— 给本库 advice 加 `HttpMediaTypeNotSupportedException` 的 handler 是够不着的死代码
+  （上面 D 腿量的就是这件事，所以 0.1.6 没顺手收 415）。
 

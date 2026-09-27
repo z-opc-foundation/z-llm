@@ -23,13 +23,19 @@ import com.zifang.z.llm.core.usage.UsageLedger;
 import org.junit.Before;
 import org.junit.Test;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
+import org.springframework.web.bind.annotation.ControllerAdvice;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -62,6 +68,8 @@ public class GatewayHttpProtocolTest {
     private UsageLedger ledger;
     private MockMvc openaiMvc;
     private MockMvc anthropicMvc;
+    /** 留着引用是给 {@link #mappingPhaseErrorsEvadePackageScopedAdvice()} 换 advice 重建 MockMvc 用. */
+    private OpenAIController openaiController;
 
     @Before
     public void setUp() {
@@ -95,9 +103,9 @@ public class GatewayHttpProtocolTest {
         apiKeyService.afterPropertiesSet();
         ObjectMapper json = new ObjectMapper();
 
-        openaiMvc = MockMvcBuilders.standaloneSetup(
-                        new OpenAIController(service, apiKeyService, rateLimiter, json, router,
-                                embeddingService))
+        openaiController = new OpenAIController(service, apiKeyService, rateLimiter, json, router,
+                embeddingService);
+        openaiMvc = MockMvcBuilders.standaloneSetup(openaiController)
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .build();
         anthropicMvc = MockMvcBuilders.standaloneSetup(
@@ -680,6 +688,144 @@ public class GatewayHttpProtocolTest {
             assertTrue(root.getMessage().contains("Overloaded"));
         }
         assertEquals(1, upstream.callCount());
+    }
+
+    // ---- #40① 对外错误语义：body 级输入错误 / mapping 级错误 ----
+
+    /**
+     * 只钉"结构性"字符串（类名、方法签名、库内部类名），不钉对外措辞 ——
+     * 否则将来改一句提示语就会误红。最后一条是 0.1.5 实际泄漏出去的那句原文。
+     */
+    private static final String[] INTERNAL_MARKERS = {
+            "public void",
+            "com.zifang.z.llm.core.controller",
+            "com.fasterxml.jackson",
+            "StreamUtils",
+            "javax.servlet",
+            "Required request body is missing"};
+
+    /**
+     * body 在进 controller 之前就读坏了（截断 / 全空 / 不是 JSON）必须回 400 + 网关信封.
+     *
+     * <p>0.1.5 及之前这五格全是 {@code 500 internal_error}：advice 没挂
+     * {@code HttpMessageNotReadableException}，它直接落到 {@code Exception} 兑底，于是
+     * (a) OpenAI 兼容客户端把"我的请求坏了"当"服务端坏了"，退避重试一个永远坏的请求；
+     * (b) Spring 原文（controller 方法签名 + Jackson 内部类名）被原样吐给调用方.
+     *
+     * <p>每格只往表里记失败、最后一次性断言：JUnit 的 fail-fast 会把第一格之后的格子
+     * 全变成"没跑到"而不是"没红"，五格就退化成一格.
+     */
+    @Test
+    public void malformedOrMissingBodyIs400AndDoesNotLeakInternals() throws Exception {
+        String[][] cells = {
+                {"openai-truncated", "openai", "/v1/chat/completions",
+                        "{\"model\":\"openai/gpt-4o\",\"messages\":["},
+                {"openai-empty", "openai", "/v1/chat/completions", ""},
+                {"openai-not-json", "openai", "/v1/chat/completions", "hello world"},
+                {"embeddings-not-json", "openai", "/v1/embeddings", "{oops"},
+                {"anthropic-empty", "anthropic", "/v1/messages", ""}};
+        List<String> bad = new ArrayList<>();
+        for (String[] c : cells) {
+            MockMvc mvc = "openai".equals(c[1]) ? openaiMvc : anthropicMvc;
+            MvcResult r = mvc.perform(post(c[2])
+                    .header("Authorization", AUTH)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(c[3])).andReturn();
+            String body = r.getResponse().getContentAsString();
+            if (r.getResponse().getStatus() != 400) {
+                bad.add(c[0] + " 状态码=" + r.getResponse().getStatus() + "（要 400）body=" + body);
+            }
+            if (!body.contains("\"type\":\"gateway_error\"")
+                    || !body.contains("\"code\":\"invalid_request\"")) {
+                bad.add(c[0] + " 信封不是 gateway_error/invalid_request: " + body);
+            }
+            for (String leak : INTERNAL_MARKERS) {
+                if (body.contains(leak)) {
+                    bad.add(c[0] + " 对外 body 泄漏内部细节 \"" + leak + "\": " + body);
+                }
+            }
+        }
+        assertEquals("body 读坏的五格都要回 400 且不吐内部细节 -> " + bad, 0, bad.size());
+        assertEquals("坏 body 不该打到上游", 0, openai.chatCalls() + anthropic.chatCalls());
+    }
+
+    private static final String MAPPING_MARKER = "MAPPING-PHASE-REACHED";
+
+    /**
+     * mapping 阶段的 415 / 405 到不了"限定了包名"的 advice —— 结构性，不是漏改.
+     *
+     * <p>四份 advice 的 handler 集合逐字相同（都继承 {@link MappingPhaseHandlers}），
+     * 唯一差别是类级限定，所以 A/B 之间的差值就是 #35 那次"收窄包名"花掉的覆盖：
+     * <ul>
+     *   <li>A 裸 advice ⇒ <b>接得到</b>（阳性腿：它不成立则下面三条 assertFalse 全是空判）
+     *   <li>B 限定成本库 controller 所在的那个包 ⇒ 接不到
+     *   <li>C 限定成 {@code com.zifang}（宿主 z-opc 那份 advice 的写法）⇒ 也接不到
+     *   <li>D 出厂 advice（本来就没挂 mapping handler）⇒ 接不到
+     * </ul>
+     * 机制：异常由 {@code HandlerMapping} 抛出，此时 handler 还没定下来 ⇒ 带限定的 advice
+     * 一律不参与，连"包名正好等于 controller 的包"都没用（B 腿）. C 腿顺带证伪一个常见想当然：
+     * 合并进程里宿主那份 {@code basePackages="com.zifang"} 的 advice 同样接不到 405，
+     * 接得到的只有<b>裸</b> advice（z-config-web 那份的形状）。
+     *
+     * <p>这条同时也说明了为什么 0.1.6 没有顺手"收 415"：给本库 advice 加
+     * {@code HttpMediaTypeNotSupportedException} 的 handler 是够不着的死代码（D 腿量出来的）.
+     */
+    @Test
+    public void mappingPhaseErrorsEvadePackageScopedAdvice() throws Exception {
+        assertTrue("A 腿：裸 advice 必须接得到 415，否则 B/C/D 三条断言都是空判",
+                bodyWithAdvice(new BareMappingAdvice(), true).contains(MAPPING_MARKER));
+        assertTrue("A 腿：同上，405",
+                bodyWithAdvice(new BareMappingAdvice(), false).contains(MAPPING_MARKER));
+        for (Object advice : new Object[]{
+                new SamePackageScopedMappingAdvice(), new HostStyleScopedMappingAdvice(),
+                new GlobalExceptionHandler()}) {
+            String cls = advice.getClass().getSimpleName();
+            assertFalse(cls + " 腿：限定了包名的 advice 不该接得到 415（接得到说明收窄失效了）",
+                    bodyWithAdvice(advice, true).contains(MAPPING_MARKER));
+            assertFalse(cls + " 腿：同上，405",
+                    bodyWithAdvice(advice, false).contains(MAPPING_MARKER));
+        }
+
+        MvcResult r404 = openaiMvc.perform(get("/v1/nope").header("Authorization", AUTH)).andReturn();
+        assertEquals("未知路径状态码", 404, r404.getResponse().getStatus());
+        assertNull("未知路径在这一层根本不抛异常（所以谈不上谁接得住它）",
+                r404.getResolvedException());
+        assertEquals("未知路径没有错误信封", "", r404.getResponse().getContentAsString());
+    }
+
+    /** @param wrongContentType true 走 415（Content-Type 不对），false 走 405（方法不对）. */
+    private String bodyWithAdvice(Object advice, boolean wrongContentType) throws Exception {
+        MockMvc mvc = MockMvcBuilders.standaloneSetup(openaiController)
+                .setControllerAdvice(advice).build();
+        return (wrongContentType
+                ? mvc.perform(post("/v1/chat/completions")
+                        .header("Authorization", AUTH)
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("{\"model\":\"openai/gpt-4o\",\"messages\":"
+                                + "[{\"role\":\"user\",\"content\":\"hi\"}]}"))
+                : mvc.perform(get("/v1/chat/completions").header("Authorization", AUTH)))
+                .andReturn().getResponse().getContentAsString();
+    }
+
+    /** 唯一真源：handler 集合。三个子类只改类级 {@code @ControllerAdvice} 的限定范围. */
+    static class MappingPhaseHandlers {
+        @ExceptionHandler({HttpMediaTypeNotSupportedException.class,
+                HttpRequestMethodNotSupportedException.class})
+        public ResponseEntity<String> handle(Exception ex) {
+            return ResponseEntity.status(400).body(MAPPING_MARKER);
+        }
+    }
+
+    @ControllerAdvice
+    static class BareMappingAdvice extends MappingPhaseHandlers {
+    }
+
+    @ControllerAdvice(basePackages = "com.zifang.z.llm.core.controller")
+    static class SamePackageScopedMappingAdvice extends MappingPhaseHandlers {
+    }
+
+    @ControllerAdvice(basePackages = "com.zifang")
+    static class HostStyleScopedMappingAdvice extends MappingPhaseHandlers {
     }
 
     private static int countOccurrences(String haystack, String needle) {
