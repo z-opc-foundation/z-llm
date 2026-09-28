@@ -4,6 +4,25 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
+    <!-- 消费入口统一走 z-boot-parent（1.0.19 起全组织口径，z-cache 试点量出来的那套步骤）：
+         继承第三方地板 z-boot-dependencies:1.0.19（156 条受管项）+ import 兄弟仓权威
+         z-boot-fleet:1.0.0（163 条 io.github.yuku123:z-*）+ Java 8 的 pluginManagement。
+         迁移前这里**没有** <parent>（io.github.yuku123:z-llm:0.1.6 实测在 repo1 上、根 pom 自包含），
+         代价是版本格全靠本仓这张 12 键的属性表维护：spring-* 与 jackson 家族全靠本仓自己 import 的
+         Boot BOM 给，而地板那侧同一批坐标已写死 jackson 2.18.6 / spring-framework 5.3.39 /
+         okhttp 4.12.0……抬一格地板要 34 个仓跟着改。
+         ⚠ relativePath 必须留空：parent 不在磁盘上，在 repo1。
+         ⚠ 发布形状（README 第 7 步）：z-boot-parent 的 flatten 声明是 `<inherited>false</inherited>`
+         （z-boot-parent/pom.xml:261），**不下发 flatten**。本仓不受影响，因为下面 <build><plugins>
+         里早就常开着自己的 oss flatten（迁移前 repo1 上 5 份 pom 的 <parent> 计数全为 0，现测），
+         换 parent 后仍然是 0 —— 形状判据是"和本仓中央上那一版对得上"，见下面 flatten 那段注释。 -->
+    <parent>
+        <groupId>io.github.yuku123</groupId>
+        <artifactId>z-boot-parent</artifactId>
+        <version>1.0.19</version>
+        <relativePath/>
+    </parent>
+
     <!--
         z-llm: LLM 网关 (中心化平台). 4 子模块.
         - z-llm-api     公共 DTO (UnifiedRequest/Response, ApiKey, LlmCredential 等)
@@ -59,44 +78,121 @@
 
     <properties>
         <!-- 项目自身版本 -->
+        <!-- 版本单一真源：抬号只改这一行（配下面常开的 oss flatten，入库/发布件里落成字面量）。
+             自家 5 个 reactor 坐标在 <dependencyManagement> 里钉的就是 ${revision}。 -->
         <revision>0.1.6</revision>
 
-        <!-- JDK / 编译 -->
-        <maven.compiler.source>8</maven.compiler.source>
-        <maven.compiler.target>8</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- JDK / 编译：maven.compiler.source=8 / maven.compiler.target=8 /
+             project.build.sourceEncoding=UTF-8 三格与父链逐字节相同
+             （现读 z-boot-parent/pom.xml:56-58），已随迁移删掉，由 parent 下发；
+             4 个子模块 pom 里那三行同样删掉（父链同一个面值）。
+             ⚠ java.version 本仓**没有**这一格，父链给的是 1.8（本仓从不引用它，
+             compiler 的 source/target 走上面那两格）⇒ 无需登记分歧。 -->
 
         <!-- 框架版本 -->
-        <spring-boot.version>2.7.18</spring-boot.version>
+        <!-- spring-boot.version=2.7.18 与父链同值（floor:42 `<spring-boot.version>2.7.18`），已删：
+             下面那条 spring-boot-dependencies import 一并撤掉，由地板自己那条 import 供
+             （floor:225 同为 2.7.18），本仓的 Boot 面版本一格没变。
+             spring-cloud.version 留着：本仓 2021.0.8 vs 地板 2.2.6.RELEASE 是**不同值**
+             （README 硬规则 2：与地板不同值的格不能删）。这一格现在全仓 0 个 <version> 读者
+             （现 grep 本仓 5 个 pom，`${spring-cloud.version}` 命中 0 处），留着是口径登记位，
+             删掉就等于"本仓不再表态"，而地板那 2.2.6.RELEASE 会补位——不是这一轮要做的事。 -->
         <spring-cloud.version>2021.0.8</spring-cloud.version>
 
         <!-- z 系列生态 -->
+        <!-- 三格逐格现量（preflight 第 2/3 节 + 现读 fleet pom）：
+             z-agent-kernel.version 本仓 0.1.0 vs fleet 0.1.1 ⇒ **分歧，必须留**，而且要靠
+               下面 4 条**直接** DM 条目顶住继承来的 0.1.1（import 进来的 BOM 顶不过直接条目，
+               z-cache/z-mq 实测的那把尺）；4 条都是本仓 main 线的直接依赖，删一格就是编译失败。
+             z-config.version 本仓 1.0.1 vs fleet 1.0.8 ⇒ **分歧，必须留**（0 个读者，同样是登记位；
+               本仓 tree 里没有任何 z-config 坐标，所以它这一版既不改 tree 也不改发布件）。
+             z-ctc.version 本仓 1.0.1 == fleet 1.0.1（现读 z-boot-fleet/pom.xml:36）⇒ 同值，已删。
+             z-mist.version 本仓 1.0.0，父链**不供给**这个键（fleet 无 z-mist 格）⇒ 按"父链不供就留着"
+               口径保留；0 个读者。 -->
         <z-agent-kernel.version>0.1.0</z-agent-kernel.version>
         <z-config.version>1.0.1</z-config.version>
-        <z-ctc.version>1.0.1</z-ctc.version>
         <z-mist.version>1.0.0</z-mist.version>
 
         <!-- Maven 插件版本 -->
+        <!-- 这 4 格父链不供给（z-boot-parent 的 pluginManagement 只有 compiler/surefire/
+             failsafe/jar/resources，见 z-boot-parent/pom.xml:205-251），且各有 1 个活跃读者
+             （preflight 第 5 节逐处点名：central-publishing / deploy / gpg / javadoc，都在下面
+             central profile 里带 <version> 引用）⇒ 全部保留，键与引用点一起留着，插件面值一格不动。
+             maven-source-plugin.version 本仓 3.3.0 vs 地板 3.2.1（floor:33）⇒ 分歧，靠 profile 里
+             那条显式 <version> 顶住（插件版本不吃 dependencyManagement）。
+             central-publishing-plugin.version=0.7.0 父链不供给、有 1 个活跃读者（下面 central
+             profile 里那条 org.sonatype.central 插件）⇒ 保留，一格没动。
+             flatten-maven-plugin.version 与父链同值 1.7.3（现读 z-boot-parent/pom.xml:70），已删键：
+             下面 <build><plugins> 那条引用继续按属性名写，值从父链继承，实际用的还是 1.7.3。
+             ⚠ 本仓没有 compiler/surefire/failsafe/jar/resources 的分歧格，这几件迁移后改吃 parent
+             下发的 3.11.0 / 2.22.2 / 2.22.2 / 3.3.0 / 3.3.1（迁移前是 Maven 3.9.16 的生命周期默认号），
+             这是"统一口径"要的结果；它们只动构建参数，不动 dependency:tree 的任何一格。 -->
         <maven-deploy-plugin.version>3.1.4</maven-deploy-plugin.version>
         <maven-source-plugin.version>3.3.0</maven-source-plugin.version>
         <maven-javadoc-plugin.version>3.11.2</maven-javadoc-plugin.version>
         <maven-gpg-plugin.version>3.2.7</maven-gpg-plugin.version>
         <central-publishing-plugin.version>0.7.0</central-publishing-plugin.version>
-        <flatten-maven-plugin.version>1.7.3</flatten-maven-plugin.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
-            <!-- Spring Boot BOM -->
+            <!-- 自家 5 个 reactor 坐标全部钉 ${revision}（本仓版本键是 ${revision}，不是
+                 ${project.version}，钉它才与 <version> 同源）。
+                 这一格不是装饰：继承来的 DM 会改写**传递依赖**的版本，而 fleet 里 z-llm 那 4 条
+                 钉的是 repo1 上已发布的 0.1.6（现读 z-boot-fleet/pom.xml:50
+                 `<z-llm.version>0.1.6</z-llm.version>`，坐标 803-818 四支）。本仓当前 revision
+                 也恰好是 0.1.6 ⇒ 这一版看不出差别，但 revision 抬到 0.1.7 而 fleet 还没跟着发时，
+                 starter/admin 的 tree 就会把 0.1.6 的旧字节码当 sibling 编进来（z-cache 试点实测：
+                 shade 包把 1.3.5 打进 1.3.6 的包里）。
+                 聚合 pom `z-llm` 这一条 fleet 没有（它只管 4 支 jar），写上是把 5 个 reactor 坐标
+                 一次钉严；它 packaging=pom ⇒ 条目必须带 <type>pom</type>（受管项按
+                 g:a:type:classifier 匹配，不带 type 的那条挂在根本不存在的 jar 坐标上），
+                 与 z-mq / z-rpc 同一写法。 -->
             <dependency>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-dependencies</artifactId>
-                <version>${spring-boot.version}</version>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-llm</artifactId>
+                <version>${revision}</version>
                 <type>pom</type>
-                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-llm-api</artifactId>
+                <version>${revision}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-llm-core</artifactId>
+                <version>${revision}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-llm-starter</artifactId>
+                <version>${revision}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-llm-admin</artifactId>
+                <version>${revision}</version>
             </dependency>
 
-            <!-- z-agent-kernel 子模块 BOM 聚合 -->
+            <!-- Spring Boot BOM —— 已删这一条 import：地板在 spring-boot-dependencies 上与本仓
+                 同值 2.7.18（现读 floor:42 与 :225-226），由 floor 自己 import 供给，本仓不必再顶一层。
+                 撤掉这层"盾"的实测代价（两遍 dependency:tree 对着 diff 过，见 commit message）：
+                 地板那几格**本仓从未声明过**的坐标开始说话——jackson 家族 2.13.5→2.18.6
+                 （floor:122 jackson.version，经 floor:193 的 jackson-bom import）、
+                 spring-* 9 件 5.3.31→5.3.39（floor:46 + :203 的 spring-framework-bom）、
+                 okhttp 4.9.3→4.12.0 / okio 2.8.0→3.9.0（floor:1106-1112 直接条目）、
+                 junit 家族 5.8.2→5.9.3 / platform 1.8.2→1.9.3（floor:56 + :179 的 junit-bom import）、
+                 json-path 2.7.0→2.9.0、json-smart/accessors-smart 2.4.11→2.4.9（floor:278/1130/1136，
+                 json-smart 这一格地板面值比 Boot 自带的 2.4.11 **低**，是地板侧的问题，不在本仓顺手改）；
+                 另外 logback-classic/logback-core/log4j-to-slf4j/jul-to-slf4j 四件从 starter-logging
+                 线下消失（floor:502-509 对 spring-boot-starter-logging 挂了 `*:*` 排除）。
+                 本仓 pom 里没有任何一件声明过上述坐标的版本，所以这些不是"本仓的选择被改掉"，
+                 而是"本仓从未有过选择"；逐格数字与判定见 commit message。 -->
+
+            <!-- z-agent-kernel 子模块 BOM 聚合 —— 4 条**直接** DM 条目，顶住继承来的 fleet 0.1.1
+                 （README 硬规则 2/5：与地板不同值且刻意选择的格必须写成直接条目，import 顶不过）。
+                 0.1.0 是本仓迁移前逐字节相同的那一格，不是这次抬的。 -->
             <dependency>
                 <groupId>io.github.yuku123</groupId>
                 <artifactId>z-agent-kernel-llm</artifactId>
@@ -215,6 +311,16 @@
 
     <build>
         <plugins>
+            <!-- 发布形状（README 第 7 步判据）：这一条**迁移前就在**、且是常开（不挂 central profile），
+                 所以换 <parent> 对本仓的发布形状没有任何影响——现测 repo1 上 z-llm 0.1.6 的 5 份 pom
+                 `<parent>` 计数全为 0（自包含），迁移后本仓 5 份 .flattened-pom.xml 仍是 0。
+                 z-boot-parent:1.0.19 那条 flatten 声明是 `<inherited>false</inherited>`
+                 （z-boot-parent/pom.xml:257-261，它自己要用 resolveCiFriendliesOnly），**不下发** flatten
+                 ⇒ 没有本仓这一条，加了 parent 之后发出去的每支 pom 都会带着 z-boot-parent:1.0.19
+                 （z-cache / z-rpc 两轮都是当场踩到这条才补的声明）。
+                 版本仍写 ${flatten-maven-plugin.version}：该属性现在从父链继承（z-boot-parent/pom.xml:70
+                 = 1.7.3，与本仓迁移前那一格逐字节相同），本仓那份同名属性已删 ⇒ 实际执行的还是 1.7.3
+                 （基线日志 flatten:1.7.3:flatten，本机 Maven 3.9.16）。 -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>flatten-maven-plugin</artifactId>

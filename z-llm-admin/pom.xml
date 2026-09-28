@@ -18,11 +18,13 @@
     <name>z-llm-admin (Control Plane)</name>
     <description>管理面 — provider / model / api-key / 限流 / 计量 / 健康 等管理 REST 接口与最小化 UI 资源</description>
 
-    <properties>
-        <maven.compiler.source>8</maven.compiler.source>
-        <maven.compiler.target>8</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
+    <!-- 本模块原先自带 maven.compiler.source/target=8 与 project.build.sourceEncoding=UTF-8 三格，
+         与父链（z-boot-parent 的 <properties>，面值与行号见根 pom 注释）逐字节相同 ⇒ 随迁移删掉，
+         由 parent 下发。自家 sibling 的 <version>${revision}</version> 保持不动（根 pom 的
+         <dependencyManagement> 钉的是同一格 ${revision}）。
+         本模块是 compile 线上唯一带 spring-boot-starter-web 的一支 ⇒ 地板那条 spring-boot-starter-logging
+         `*:*` 排除在这里吃掉了 logback-classic / logback-core / log4j-to-slf4j / jul-to-slf4j
+         （判定与"刻意不补回"的理由写在 z-llm-starter/pom.xml 的对应注释里，同一把尺）。 -->
 
     <url>https://github.com/z-opc-foundation/z-llm</url>
     <licenses>

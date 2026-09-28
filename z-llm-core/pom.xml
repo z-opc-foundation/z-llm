@@ -18,11 +18,10 @@
     <name>z-llm-core (Gateway)</name>
     <description>HTTP 网关核心 — 双协议适配 (OpenAI/Anthropic) + AK 保管 + Provider 注册 + 计量/限流</description>
 
-    <properties>
-        <maven.compiler.source>8</maven.compiler.source>
-        <maven.compiler.target>8</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
+    <!-- 本模块原先自带 maven.compiler.source/target=8 与 project.build.sourceEncoding=UTF-8 三格，
+         与父链（z-boot-parent 的 <properties>，面值与行号见根 pom 注释）逐字节相同 ⇒ 随迁移删掉，
+         由 parent 下发。下面自家 sibling 的 <version>${revision}</version> 保持不动：根 pom 的
+         <dependencyManagement> 已把 5 个 reactor 坐标钉成同一个 ${revision}，两处同源不会分叉。 -->
 
     <url>https://github.com/z-opc-foundation/z-llm</url>
     <licenses>
