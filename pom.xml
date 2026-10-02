@@ -24,11 +24,12 @@
     </parent>
 
     <!--
-        z-llm: LLM 网关 (中心化平台). 4 子模块.
+        z-llm: LLM 网关 (中心化平台). 5 子模块.
         - z-llm-api     公共 DTO (UnifiedRequest/Response, ApiKey, LlmCredential 等)
         - z-llm-core    HTTP 网关 + OpenAI/Anthropic 双协议适配 + AK 保管 + 限流 + 计量 + Provider 注册
         - z-llm-starter Spring Boot Starter (auto-configuration + properties binding)
         - z-llm-admin   管理面 (provider / model / health / config)
+        - z-llm-config  DB-backed CRUD 配置面板 (z_llm_provider / z_llm_model / z_agent_tool_template)
         依赖 z-agent-kernel-llm + z-agent-kernel-message + z-agent-kernel-types, 不重复实现 provider 调用.
         暴露 OpenAI / Anthropic 标准协议, 持有各家 provider AK 并分发.
         发版模式: reversion (CI-friendly versions) + flatten-maven-plugin, 跟 z-boot 同源.
@@ -74,6 +75,7 @@
         <module>z-llm-core</module>
         <module>z-llm-starter</module>
         <module>z-llm-admin</module>
+        <module>z-llm-config</module>
     </modules>
 
     <properties>
@@ -172,6 +174,11 @@
             <dependency>
                 <groupId>io.github.yuku123</groupId>
                 <artifactId>z-llm-admin</artifactId>
+                <version>${revision}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-llm-config</artifactId>
                 <version>${revision}</version>
             </dependency>
 

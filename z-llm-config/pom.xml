@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.github.yuku123</groupId>
+        <artifactId>z-llm</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <groupId>io.github.yuku123</groupId>
+    <artifactId>z-llm-config</artifactId>
+    <version>${revision}</version>
+    <packaging>jar</packaging>
+
+    <name>z-llm-config (DB-backed Provider / Model / ToolTemplate CRUD)</name>
+    <description>
+        配置面板 — z_llm_provider / z_llm_model / z_agent_tool_template 三张表的
+        DB-backed CRUD (LlmProvider / LlmModel / AgentToolTemplate entity + mapper +
+        service + REST controller)。
+        替代 z-opc 内 z-agent-llm-center（已删除）的 Provider/Model/ToolTemplate
+        配置面板功能。
+    </description>
+
+    <url>https://github.com/z-opc-foundation/z-llm</url>
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <id>yuku123</id>
+            <name>yuku123</name>
+            <email>1340947819@qq.com</email>
+            <organization>z-team</organization>
+            <organizationUrl>https://github.com/yuku123</organizationUrl>
+            <roles>
+                <role>owner</role>
+            </roles>
+        </developer>
+    </developers>
+    <scm>
+        <connection>scm:git:git://github.com/z-opc-foundation/z-llm.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/z-opc-foundation/z-llm.git</developerConnection>
+        <url>https://github.com/z-opc-foundation/z-llm/tree/main/z-llm-config</url>
+    </scm>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-llm-api</artifactId>
+            <version>${revision}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-llm-core</artifactId>
+            <version>${revision}</version>
+        </dependency>
+
+        <!-- MyBatis-Plus 持久层 -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-boot-starter</artifactId>
+            <version>3.5.7</version>
+        </dependency>
+
+        <!-- z-boot-datasource-starter：ModuleDataSourceTemplate 多数据源支持
+             （与原 z-agent-llm-center 的 DataSourceConfigForLlm 同样的接入方式） -->
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-boot-datasource-starter</artifactId>
+            <version>${z-boot.version}</version>
+        </dependency>
+
+        <!-- Spring Web（REST 端点） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- com.zifang.util.core.meta.Result（z-util-core 公共返回类型） -->
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-util-core</artifactId>
+        </dependency>
+
+        <!-- Swagger / OpenAPI 注解 (io.swagger.core.v3 / oas.annotations) -->
+        <dependency>
+            <groupId>io.swagger.core.v3</groupId>
+            <artifactId>swagger-annotations</artifactId>
+            <version>${swagger.v3.version}</version>
+        </dependency>
+    </dependencies>
+</project>
