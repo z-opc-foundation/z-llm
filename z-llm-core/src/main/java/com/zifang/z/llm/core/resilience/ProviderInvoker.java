@@ -166,7 +166,13 @@ public class ProviderInvoker {
                     throw propagate(t);
                 }
                 reportFailure(h, t);
-                sleepBackoff(retry, i);
+                // 只有"后面还有下一次尝试"时才退避。最后一次失败之后没有下一次了，
+                // 再睡就是纯浪费：调用方已经注定要收到 poolExhausted，却要多等
+                // backoffMs * maxAttempts（默认 200ms * 3 = 600ms）才拿到那个错误，
+                // 而这整条链路跑在 servlet 请求线程上。
+                if (i < max - 1) {
+                    sleepBackoff(retry, i);
+                }
             }
         }
         throw poolExhausted(tried, vendor, last);
