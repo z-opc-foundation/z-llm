@@ -106,6 +106,22 @@ public class GatewayProperties {
         private boolean enabled = true;
         /** 单次请求最多尝试几个凭据 (含首个). */
         private int maxAttempts = 3;
+        /**
+         * 跨凭据重试的<b>总时长预算</b>（毫秒）. {@code 0} 表示不限.
+         *
+         * <p>为什么需要它：{@code maxAttempts} 只约束<b>次数</b>，而每次尝试都要跑一遍真实的
+         * 上游调用。总挂起时间因此是 {@code min(maxAttempts, 凭据池大小) × 单次上游超时}
+         * 再加退避——按本仓默认（3 次 × {@code upstream-read-timeout-sec=300} + 连接超时 10s）
+         * 最坏约 <b>930 秒</b>，整条链路占着一个 servlet 请求线程。改 {@code maxAttempts}
+         * 会把这个乘积线性放大，而没有任何配置项能看见它。</p>
+         *
+         * <p>设为 {@code > 0} 后即为硬上限：预算用尽就停止换凭据，直接返回失败，
+         * <b>并且不再退避</b>（调用方注定要收到池耗尽错误，让它在请求线程上多睡一轮没有意义）。</p>
+         *
+         * <p>取值要<b>大于单次上游超时</b>，否则第一次尝试结束时预算就已用尽，
+         * failover 等于关闭——流式长回答本来就靠那个读超时兜着。</p>
+         */
+        private long maxElapsedMs = 0L;
         /** 每次重试前的基准退避毫秒 (按尝试次数线性放大). */
         private long backoffMs = 200L;
         /** 凭据被打上冷却的时长. */
@@ -125,6 +141,14 @@ public class GatewayProperties {
 
         public void setMaxAttempts(int maxAttempts) {
             this.maxAttempts = maxAttempts;
+        }
+
+        public long getMaxElapsedMs() {
+            return maxElapsedMs;
+        }
+
+        public void setMaxElapsedMs(long maxElapsedMs) {
+            this.maxElapsedMs = maxElapsedMs;
         }
 
         public long getBackoffMs() {

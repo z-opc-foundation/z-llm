@@ -313,6 +313,19 @@ kernel 没公开常量 —— 是已知重复，不是同一个源）。
 `retryable()` 实测口径：429 / 401 / 403 / 5xx 换凭据重试；其余 4xx（如 400 参数错）直接透出；
 无 HTTP 状态的连接 / 超时 / 解析故障也换凭据。
 
+**换凭据有次数上限，也有总时长预算**。次数是 `min(retry.max-attempts, 凭据池大小)`，
+但真正挂住请求线程的是**这个次数乘以单次上游超时**：按本仓默认
+（3 次 × `upstream-read-timeout-sec=300` + 连接 10s）最坏约 **930 秒**，
+整条链路占着一个 servlet 请求线程，而没有任何配置项能看见这个乘积——
+改 `max-attempts` 会把它线性放大。`retry.max-elapsed-ms`（默认 `0` = 不限）就是补这个缺口的：
+设成 `>0` 之后它成为硬上限，预算用尽即停止换凭据、**并且不再退避**
+（调用方注定要收到池耗尽错误，让它在请求线程上多睡一轮没有意义）。
+
+取值要**大于单次上游超时**，否则第一次尝试结束时预算就已用尽、failover 等于关闭——
+流式长回答本来就靠那个读超时兜着。流式场景的换凭据安全性是另一回事，已经单独处理：
+**只能在还没吐出任何 chunk 时安全换凭据**，一旦向客户端吐过内容再切就会让客户端收到
+两段互相矛盾的回复（`ChatGatewayService#streamChat`）。
+
 状态码语义（`GlobalExceptionHandler`）：
 
 | 情况 | 结果 |
@@ -377,6 +390,7 @@ kernel 没公开常量 —— 是已知重复，不是同一个源）。
 | `enforce-key-restrictions` | `true` | 是否强制 `allowed-models` / `allowed-vendors` 白名单（`false` 只告警，用于灰度） |
 | `retry.enabled` | `true` | 跨凭据 failover |
 | `retry.max-attempts` | `3` | 单次请求最多尝试几个凭据（含首个） |
+| `retry.max-elapsed-ms` | `0`（不限） | 跨凭据重试的**总时长预算**。`>0` 即硬上限：预算用尽就停止换凭据、不再退避，直接返回失败 |
 | `retry.backoff-ms` | `200` | 每次重试前基准退避，按尝试次数线性放大 |
 | `retry.cooldown-ms` | `30000` | 凭据冷却时长 |
 | `model-aliases` | `{}` | 请求 model → 内部 `vendor/model` |
@@ -405,18 +419,20 @@ mvn -B test                          # 全 reactor
 `-am` 不是可省的：不带它时 `z-llm-api` 会从本地 m2 解析到已发布的旧 jar，新增的 DTO 直接
 `NoClassDefFoundError`。改过 `z-llm-api` 后要让消费方看到，需要 `mvn install`。
 
-静态计数（本轮 `grep @Test` 实测）：`z-llm-core` 139 个测试方法、`z-llm-starter` 2、`z-llm-admin` 2。
-下表是上次全 reactor 跑通的 surefire 读数（2026-09-25 实测，此后本仓只动过 POM、未动 java；本轮按
-任务口径未重跑构建）—— 两个数一个是静态计数、一个是运行汇总，口径不同，不要互相校正：
+静态计数（2026-10-06 `grep @Test` 实测）：`z-llm-core` 147 个测试方法、`z-llm-starter` 2、`z-llm-admin` 2。
+下表是同日全 reactor 跑通的 surefire 读数——两个数一个是静态计数、一个是运行汇总，
+口径不同，不要互相校正（`ProviderInvokerBudgetTest` 的 6 个方法与静态计数一致，
+差额来自 `@ParameterizedTest` 一类不由 `@Test` 计数的用法）：
 
 | 模块 | Tests | Failures | Errors | Skipped |
 | --- | --- | --- | --- | --- |
-| `z-llm-core` | 135 | 0 | 0 | 5 |
+| `z-llm-core` | 147 | 0 | 0 | 5 |
 | `z-llm-starter` | 2 | 0 | 0 | 0 |
 | `z-llm-admin` | 2 | 0 | 0 | 0 |
 
 覆盖层面：双协议 HTTP 线格式（MockMvc，含 embeddings 与 Anthropic 转发）、请求映射、参数下沉、
-模型路由、凭据池 failover 与状态码、限流三口径、记账、starter 装配 smoke、控制面注册开关与 key 掩码。
+模型路由、凭据池 failover 与状态码、**跨凭据重试的总时长预算**、限流三口径、记账、
+starter 装配 smoke、控制面注册开关与 key 掩码。
 
 ### 真实上游 E2E
 

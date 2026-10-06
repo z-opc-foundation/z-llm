@@ -18,6 +18,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.LongConsumer;
+import java.util.function.LongSupplier;
 
 /**
  * 凭据池调用器 — 同一 vendor 内跨凭据 failover + 冷却.
@@ -75,12 +77,27 @@ public class ProviderInvoker {
     private final ConcurrentHashMap<String, Long> cooldownUntil = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Stat> stats = new ConcurrentHashMap<>();
 
+    /** 可注入时钟（毫秒）：总时长预算按它判定，判据因此零 sleep。 */
+    private final LongSupplier clockMs;
+    /** 可注入退避：判据据此断言"预算用尽后不再退避"。 */
+    private final LongConsumer backoffSleeper;
+
     public ProviderInvoker(GatewayProperties properties,
                           LlmProviderRegistry registry,
                           LlmCredentialStore credentialStore) {
+        this(properties, registry, credentialStore, System::currentTimeMillis, ProviderInvoker::sleepQuietly);
+    }
+
+    public ProviderInvoker(GatewayProperties properties,
+                          LlmProviderRegistry registry,
+                          LlmCredentialStore credentialStore,
+                          LongSupplier clockMs,
+                          LongConsumer backoffSleeper) {
         this.properties = properties;
         this.registry = registry;
         this.credentialStore = credentialStore;
+        this.clockMs = clockMs == null ? System::currentTimeMillis : clockMs;
+        this.backoffSleeper = backoffSleeper == null ? ProviderInvoker::sleepQuietly : backoffSleeper;
     }
 
     /** 本次请求在该 vendor 上最多尝试几个凭据. */
@@ -142,6 +159,11 @@ public class ProviderInvoker {
     /**
      * 带 failover 的执行. body 抛出的异常按可重试性决定是否换下一个凭据.
      *
+     * <p>换凭据的次数上限是 {@code min(attemptsCap, 凭据池大小)}；
+     * 若配了 {@code retry.max-elapsed-ms}，还额外受一个<b>总时长预算</b>约束：
+     * 预算用尽就停止换凭据、不再退避，直接返回失败。两次约束都要，因为单次数上限
+     * 乘上单次上游超时（默认读超时 300s）才是真正挂住请求线程的那个数。</p>
+     *
      * @param attemptsCap 本次最多尝试几个凭据 (含首个)
      */
     public <T> T execute(Vendor vendor, int attemptsCap, Function<Handle, T> body) {
@@ -151,6 +173,8 @@ public class ProviderInvoker {
             throw GatewayException.internal("No active credential for vendor " + vendor, null);
         }
         int max = retry.isEnabled() ? Math.max(1, Math.min(attemptsCap, pool.size())) : 1;
+        long budgetMs = retry.getMaxElapsedMs();
+        long startedAt = clockMs.getAsLong();
         Throwable last = null;
         int tried = 0;
         for (int i = 0; i < max; i++) {
@@ -166,6 +190,11 @@ public class ProviderInvoker {
                     throw propagate(t);
                 }
                 reportFailure(h, t);
+                // 预算已经用完就不再换下一个凭据，也不再退避：调用方注定要收到
+                // poolExhausted，让它在 servlet 请求线程上多睡一轮纯属浪费。
+                if (budgetMs > 0 && clockMs.getAsLong() - startedAt >= budgetMs) {
+                    break;
+                }
                 // 只有"后面还有下一次尝试"时才退避。最后一次失败之后没有下一次了，
                 // 再睡就是纯浪费：调用方已经注定要收到 poolExhausted，却要多等
                 // backoffMs * maxAttempts（默认 200ms * 3 = 600ms）才拿到那个错误，
@@ -303,13 +332,17 @@ public class ProviderInvoker {
         return s;
     }
 
-    private static void sleepBackoff(GatewayProperties.Retry retry, int attempt) {
+    private void sleepBackoff(GatewayProperties.Retry retry, int attempt) {
         long ms = retry.getBackoffMs() * (attempt + 1L);
         if (ms <= 0) {
             return;
         }
+        backoffSleeper.accept(Math.min(ms, 5_000L));
+    }
+
+    private static void sleepQuietly(long ms) {
         try {
-            Thread.sleep(Math.min(ms, 5_000L));
+            Thread.sleep(ms);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
         }
