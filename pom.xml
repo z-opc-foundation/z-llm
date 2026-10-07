@@ -322,6 +322,13 @@
                             <publishingServerId>central</publishingServerId>
                             <tokenAuth>true</tokenAuth>
                             <autoPublish>true</autoPublish>
+                            <!-- 本插件不认 maven.deploy.skip，没排除的模块照样进 bundle
+                                 （实测结论见 z-schedule/pom.xml 同位置注释）⇒ 不可发布的模块点名列出。
+                              · z-llm-admin：管理端可执行应用，只有主类 + 数据源配置，repackage 不带
+                                  classifier ⇒ 产物是执行 fat jar，不是别仓可引的库件。 -->
+                            <excludeArtifacts>
+                                <excludeArtifact>z-llm-admin</excludeArtifact>
+                            </excludeArtifacts>
                             <waitUntil>uploaded</waitUntil>
                             <waitMaxTime>1800</waitMaxTime>
                             <waitPollingInterval>10</waitPollingInterval>
