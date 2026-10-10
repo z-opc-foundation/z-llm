@@ -16,7 +16,7 @@ export const menuItems = [
     { key: '/z-llm/models', label: '模型', icon: <RobotOutlined /> },
 ]
 
-export const routeTable = [
+export const routes = [
     { path: '/z-llm/home', Component: HomePage },
     { path: '/z-llm/providers', Component: Provider },
     { path: '/z-llm/models', Component: Model },
