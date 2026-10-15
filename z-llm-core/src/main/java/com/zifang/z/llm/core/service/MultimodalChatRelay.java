@@ -1,10 +1,7 @@
 package com.zifang.z.llm.core.service;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.zifang.util.json.JsonCursor;
+import com.zifang.util.json.JsonUtil;
 import com.zifang.z.llm.api.dto.ApiKey;
 import com.zifang.z.llm.api.dto.Choice;
 import com.zifang.z.llm.api.dto.ContentPart;
@@ -49,13 +46,8 @@ public class MultimodalChatRelay {
 
     private static final Logger log = LoggerFactory.getLogger(MultimodalChatRelay.class);
 
-    /** 上游 chunk 里除 OpenAI 已知字段外还有 logprobs / index 等, 因此回转必须宽容. */
-    private final ObjectMapper lenient = new ObjectMapper()
-            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-
-    /** ObjectMapper 构造不便宜且线程安全, 出站体组装全程共用一个. */
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-
+    // 上游 chunk 里除 OpenAI 已知字段外还有 logprobs / index 等, 回转必须宽容 ——
+    // JsonUtil.fromJson 本身就对未知字段宽容 (未知键直接忽略), 所以原来的 lenient 配置已无处可留。
     private final LlmCredentialStore credentialStore;
     private final ProviderInvoker invoker;
     private final UsageLedger usageLedger;
@@ -120,8 +112,8 @@ public class MultimodalChatRelay {
 
     public RelayResult chat(UnifiedRequest req, ModelRouter.Resolved resolved, ApiKey key) {
         final Vendor vendor = resolved.vendor();
-        final ObjectNode body = buildBody(req, resolved, false);
-        JsonNode raw = invoker.execute(vendor, invoker.attemptsFor(vendor), h -> {
+        final Map<String, Object> body = buildBody(req, resolved, false);
+        JsonCursor raw = invoker.execute(vendor, invoker.attemptsFor(vendor), h -> {
             LlmCredential cred = credentialStore.findByAlias(h.alias());
             if (cred == null) {
                 throw GatewayException.internal("credential " + h.alias() + " vanished", null);
@@ -145,7 +137,7 @@ public class MultimodalChatRelay {
                                   Consumer<Throwable> onError,
                                   Runnable onComplete) {
         final Vendor vendor = resolved.vendor();
-        final ObjectNode body = buildBody(req, resolved, true);
+        final Map<String, Object> body = buildBody(req, resolved, true);
         final AtomicBoolean finished = new AtomicBoolean(false);
         final AtomicBoolean emitted = new AtomicBoolean(false);
         final int[] chunkCount = new int[1];
@@ -234,16 +226,17 @@ public class MultimodalChatRelay {
 
     // ---- 请求体 ----
 
-    ObjectNode buildBody(UnifiedRequest req, ModelRouter.Resolved resolved, boolean stream) {
+    Map<String, Object> buildBody(UnifiedRequest req, ModelRouter.Resolved resolved, boolean stream) {
         return resolved.vendor() == Vendor.ANTHROPIC
                 ? buildAnthropicBody(req, resolved, stream)
                 : buildOpenAiBody(req, resolved, stream);
     }
 
-    private ObjectNode buildOpenAiBody(UnifiedRequest req, ModelRouter.Resolved resolved, boolean stream) {
-        ObjectNode body = MAPPER.createObjectNode();
+    private Map<String, Object> buildOpenAiBody(UnifiedRequest req, ModelRouter.Resolved resolved, boolean stream) {
+        Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", resolved.bareModel());
-        ArrayNode messages = body.putArray("messages");
+        List<Object> messages = new ArrayList<>();
+        body.put("messages", messages);
         if (req.getMessages() != null) {
             for (UnifiedMessage m : req.getMessages()) {
                 messages.add(toOpenAiMessage(m));
@@ -263,34 +256,43 @@ public class MultimodalChatRelay {
         }
         List<ToolSpec> specs = req.getTools();
         if (specs != null && !specs.isEmpty()) {
-            ArrayNode tools = body.putArray("tools");
+            List<Object> tools = new ArrayList<>();
+            body.put("tools", tools);
             for (ToolSpec ts : specs) {
                 if (ts == null || ts.getFunction() == null) {
                     continue;
                 }
-                ObjectNode t = tools.addObject();
+                Map<String, Object> t = new LinkedHashMap<>();
+                tools.add(t);
                 t.put("type", ts.getType() == null ? "function" : ts.getType());
-                ObjectNode fn = t.putObject("function");
+                Map<String, Object> fn = new LinkedHashMap<>();
+                t.put("function", fn);
                 fn.put("name", ts.getFunction().getName());
                 if (ts.getFunction().getDescription() != null) {
                     fn.put("description", ts.getFunction().getDescription());
                 }
                 if (ts.getFunction().getParameters() != null) {
-                    fn.set("parameters", MAPPER.valueToTree(ts.getFunction().getParameters()));
+                    // parameters 本来就是 Map<String,Object>, 直接放进出站体即可, 不必再转树.
+                    fn.put("parameters", ts.getFunction().getParameters());
                 }
             }
         }
-        // 其余采样参数按 vendor 下沉 (stop / tool_choice / penalties / user / extra).
+        return withParams(body, req, resolved);
+    }
+
+    /** 其余采样参数按 vendor 下沉 (stop / tool_choice / penalties / user / extra). */
+    private static Map<String, Object> withParams(Map<String, Object> body, UnifiedRequest req,
+                                                   ModelRouter.Resolved resolved) {
         Map<String, Object> params = new LinkedHashMap<>(
                 ParamTranslator.forVendor(resolved.vendor(), req));
         for (Map.Entry<String, Object> e : params.entrySet()) {
-            body.set(e.getKey(), MAPPER.valueToTree(e.getValue()));
+            body.put(e.getKey(), e.getValue());
         }
         return body;
     }
 
-    private ObjectNode toOpenAiMessage(UnifiedMessage m) {
-        ObjectNode node = MAPPER.createObjectNode();
+    private Map<String, Object> toOpenAiMessage(UnifiedMessage m) {
+        Map<String, Object> node = new LinkedHashMap<>();
         node.put("role", m.getRole() == null ? "user" : m.getRole());
         if (m.getName() != null) {
             node.put("name", m.getName());
@@ -299,16 +301,19 @@ public class MultimodalChatRelay {
         boolean hasImages = hasImageParts(parts);
         if (hasImages) {
             // content 只在"确有图片"时才升成数组, 纯文本消息保持字符串形状。
-            ArrayNode arr = node.putArray("content");
+            List<Object> arr = new ArrayList<>();
+            node.put("content", arr);
             if (parts != null) {
                 for (ContentPart p : parts) {
                     if (p == null) {
                         continue;
                     }
                     if (isImage(p)) {
-                        ObjectNode item = arr.addObject();
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        arr.add(item);
                         item.put("type", "image_url");
-                        ObjectNode img = item.putObject("image_url");
+                        Map<String, Object> img = new LinkedHashMap<>();
+                        item.put("image_url", img);
                         if (p.getImageUrl() != null) {
                             img.put("url", p.getImageUrl().getUrl());
                             if (p.getImageUrl().getDetail() != null) {
@@ -316,7 +321,8 @@ public class MultimodalChatRelay {
                             }
                         }
                     } else {
-                        ObjectNode item = arr.addObject();
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        arr.add(item);
                         item.put("type", "text");
                         item.put("text", p.getText() == null ? "" : p.getText());
                     }
@@ -330,12 +336,15 @@ public class MultimodalChatRelay {
         }
         List<ToolCall> tcs = m.getToolCalls();
         if (tcs != null && !tcs.isEmpty()) {
-            ArrayNode arr = node.putArray("tool_calls");
+            List<Object> arr = new ArrayList<>();
+            node.put("tool_calls", arr);
             for (ToolCall tc : tcs) {
-                ObjectNode t = arr.addObject();
+                Map<String, Object> t = new LinkedHashMap<>();
+                arr.add(t);
                 t.put("id", tc.getId());
                 t.put("type", "function");
-                ObjectNode fn = t.putObject("function");
+                Map<String, Object> fn = new LinkedHashMap<>();
+                t.put("function", fn);
                 if (tc.getFunction() != null) {
                     fn.put("name", tc.getFunction().getName());
                     fn.put("arguments", tc.getFunction().getArguments() == null
@@ -368,11 +377,12 @@ public class MultimodalChatRelay {
      * system 在顶层、max_tokens 必填、tool 结果要挂在 user 消息里 ——
      * 这三条与 OpenAI 形状不同, 直接复用会换来上游 400, 所以单独组装.
      */
-    private ObjectNode buildAnthropicBody(UnifiedRequest req, ModelRouter.Resolved resolved, boolean stream) {
-        ObjectNode body = MAPPER.createObjectNode();
+    private Map<String, Object> buildAnthropicBody(UnifiedRequest req, ModelRouter.Resolved resolved, boolean stream) {
+        Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", resolved.bareModel());
         StringBuilder system = new StringBuilder();
-        ArrayNode messages = body.putArray("messages");
+        List<Object> messages = new ArrayList<>();
+        body.put("messages", messages);
         if (req.getMessages() != null) {
             for (UnifiedMessage m : req.getMessages()) {
                 if (m == null) {
@@ -408,35 +418,35 @@ public class MultimodalChatRelay {
         }
         List<ToolSpec> specs = req.getTools();
         if (specs != null && !specs.isEmpty()) {
-            ArrayNode tools = body.putArray("tools");
+            List<Object> tools = new ArrayList<>();
+            body.put("tools", tools);
             for (ToolSpec ts : specs) {
                 if (ts == null || ts.getFunction() == null) {
                     continue;
                 }
-                ObjectNode t = tools.addObject();
+                Map<String, Object> t = new LinkedHashMap<>();
+                tools.add(t);
                 t.put("name", ts.getFunction().getName());
                 if (ts.getFunction().getDescription() != null) {
                     t.put("description", ts.getFunction().getDescription());
                 }
-                t.set("input_schema", ts.getFunction().getParameters() == null
-                        ? MAPPER.createObjectNode() : MAPPER.valueToTree(ts.getFunction().getParameters()));
+                t.put("input_schema", ts.getFunction().getParameters() == null
+                        ? new LinkedHashMap<String, Object>() : ts.getFunction().getParameters());
             }
         }
-        Map<String, Object> params = new LinkedHashMap<>(
-                ParamTranslator.forVendor(resolved.vendor(), req));
-        for (Map.Entry<String, Object> e : params.entrySet()) {
-            body.set(e.getKey(), MAPPER.valueToTree(e.getValue()));
-        }
-        return body;
+        return withParams(body, req, resolved);
     }
 
-    private ObjectNode toAnthropicMessage(UnifiedMessage m, String role) {
-        ObjectNode node = MAPPER.createObjectNode();
+    private Map<String, Object> toAnthropicMessage(UnifiedMessage m, String role) {
+        Map<String, Object> node = new LinkedHashMap<>();
         List<ContentPart> parts = m.getContents();
         boolean hasImages = hasImageParts(parts);
         if ("tool".equals(role) || m.getToolCallId() != null) {
             node.put("role", "user");
-            ObjectNode tr = node.putArray("content").addObject();
+            List<Object> content = new ArrayList<>();
+            node.put("content", content);
+            Map<String, Object> tr = new LinkedHashMap<>();
+            content.add(tr);
             tr.put("type", "tool_result");
             tr.put("tool_use_id", m.getToolCallId());
             tr.put("content", textOf(parts, m.getContent()));
@@ -449,16 +459,20 @@ public class MultimodalChatRelay {
             node.put("content", textOf(parts, m.getContent()));
             return node;
         }
-        ArrayNode blocks = node.putArray("content");
+        List<Object> blocks = new ArrayList<>();
+        node.put("content", blocks);
         if (hasImages) {
             for (ContentPart p : parts) {
                 if (p == null) {
                     continue;
                 }
                 if (isImage(p)) {
-                    addImageBlock(blocks.addObject(), p);
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    blocks.add(item);
+                    addImageBlock(item, p);
                 } else {
-                    ObjectNode text = blocks.addObject();
+                    Map<String, Object> text = new LinkedHashMap<>();
+                    blocks.add(text);
                     text.put("type", "text");
                     text.put("text", p.getText() == null ? "" : p.getText());
                 }
@@ -466,7 +480,10 @@ public class MultimodalChatRelay {
         } else {
             String text = textOf(parts, m.getContent());
             if (!text.isEmpty()) {
-                blocks.addObject().put("type", "text").put("text", text);
+                Map<String, Object> item = new LinkedHashMap<>();
+                blocks.add(item);
+                item.put("type", "text");
+                item.put("text", text);
             }
         }
         if (hasToolCalls) {
@@ -474,19 +491,21 @@ public class MultimodalChatRelay {
                 if (tc == null || tc.getFunction() == null) {
                     continue;
                 }
-                ObjectNode use = blocks.addObject();
+                Map<String, Object> use = new LinkedHashMap<>();
+                blocks.add(use);
                 use.put("type", "tool_use");
                 use.put("id", tc.getId());
                 use.put("name", tc.getFunction().getName());
-                use.set("input", parseArgsOrEmpty(tc.getFunction().getArguments()));
+                use.put("input", parseArgsOrEmpty(tc.getFunction().getArguments()));
             }
         }
         return node;
     }
 
-    private static void addImageBlock(ObjectNode item, ContentPart p) {
+    private static void addImageBlock(Map<String, Object> item, ContentPart p) {
         item.put("type", "image");
-        ObjectNode source = item.putObject("source");
+        Map<String, Object> source = new LinkedHashMap<>();
+        item.put("source", source);
         String url = p.getImageUrl() == null ? null : p.getImageUrl().getUrl();
         if (url != null && url.startsWith("data:")) {
             // data:image/png;base64,xxx —— Anthropic 的 base64 source 要拆开 media_type 与 data.
@@ -502,15 +521,15 @@ public class MultimodalChatRelay {
         }
     }
 
-    private JsonNode parseArgsOrEmpty(String arguments) {
+    private Object parseArgsOrEmpty(String arguments) {
         if (arguments == null || arguments.trim().isEmpty()) {
-            return MAPPER.createObjectNode();
+            return new LinkedHashMap<String, Object>();
         }
         try {
-            JsonNode parsed = lenient.readTree(arguments);
-            return parsed.isObject() ? parsed : MAPPER.createObjectNode();
+            Object parsed = JsonUtil.parse(arguments);
+            return parsed instanceof Map ? parsed : new LinkedHashMap<String, Object>();
         } catch (Exception e) {
-            return MAPPER.createObjectNode();
+            return new LinkedHashMap<String, Object>();
         }
     }
 
@@ -532,13 +551,14 @@ public class MultimodalChatRelay {
 
     // ---- 回转 ----
 
-    UnifiedResponse toResponse(JsonNode raw, ModelRouter.Resolved resolved) {
-        if (raw == null || raw.isNull() || raw.isMissingNode()) {
+    UnifiedResponse toResponse(JsonCursor raw, ModelRouter.Resolved resolved) {
+        if (raw == null || raw.isNull() || raw.isMissing()) {
             throw GatewayException.upstreamFailed("relay upstream returned an empty body", null);
         }
         UnifiedResponse out;
         try {
-            out = lenient.treeToValue(raw, UnifiedResponse.class);
+            // JsonCursor 不支持 treeToValue, 走 value() 拿底层节点再反序列化.
+            out = JsonUtil.fromJson(JsonUtil.toJson(raw.value()), UnifiedResponse.class);
         } catch (Exception e) {
             throw GatewayException.upstreamFailed("relay response is not a chat.completion: "
                     + e.getMessage(), e);
@@ -552,7 +572,7 @@ public class MultimodalChatRelay {
 
     UnifiedStreamChunk toChunk(String payload, ModelRouter.Resolved resolved) {
         try {
-            UnifiedStreamChunk chunk = lenient.readValue(payload, UnifiedStreamChunk.class);
+            UnifiedStreamChunk chunk = JsonUtil.fromJson(payload, UnifiedStreamChunk.class);
             chunk.setModel(ModelNames.external(chunk.getModel(), resolved));
             return chunk;
         } catch (Exception e) {
@@ -569,13 +589,13 @@ public class MultimodalChatRelay {
         private long completion;
     }
 
-    UnifiedResponse toAnthropicResponse(JsonNode raw, ModelRouter.Resolved resolved) {
-        if (raw == null || raw.isNull() || raw.isMissingNode()) {
+    UnifiedResponse toAnthropicResponse(JsonCursor raw, ModelRouter.Resolved resolved) {
+        if (raw == null || raw.isNull() || raw.isMissing()) {
             throw GatewayException.upstreamFailed("relay upstream returned an empty body", null);
         }
         StringBuilder text = new StringBuilder();
         List<ToolCall> calls = new ArrayList<>();
-        for (JsonNode block : raw.path("content")) {
+        for (JsonCursor block : raw.path("content").elements()) {
             String type = str(block, "type");
             if ("text".equals(type)) {
                 text.append(str(block, "text"));
@@ -585,7 +605,8 @@ public class MultimodalChatRelay {
                 call.setType("function");
                 ToolCall.FunctionCall fn = new ToolCall.FunctionCall();
                 fn.setName(str(block, "name"));
-                fn.setArguments(block.path("input").isMissingNode() ? "{}" : block.path("input").toString());
+                JsonCursor input = block.path("input");
+                fn.setArguments(input.isMissing() ? "{}" : JsonUtil.toJson(input.value()));
                 call.setFunction(fn);
                 calls.add(call);
             }
@@ -609,7 +630,7 @@ public class MultimodalChatRelay {
         List<Choice> choices = new ArrayList<>();
         choices.add(choice);
         out.setChoices(choices);
-        JsonNode usage = raw.path("usage");
+        JsonCursor usage = raw.path("usage");
         if (usage.isObject()) {
             out.setUsage(usageInfo(usage.path("input_tokens").asLong(0L),
                     usage.path("output_tokens").asLong(0L)));
@@ -624,16 +645,16 @@ public class MultimodalChatRelay {
      */
     UnifiedStreamChunk toAnthropicChunk(String payload, ModelRouter.Resolved resolved,
                                        AnthropicStreamState state) {
-        JsonNode root;
+        JsonCursor root;
         try {
-            root = lenient.readTree(payload);
+            root = JsonCursor.of(JsonUtil.parse(payload));
         } catch (Exception e) {
             throw GatewayException.upstreamFailed(
                     "relay produced a non-JSON stream frame: " + payload, e);
         }
         String type = str(root, "type");
         if ("message_start".equals(type)) {
-            JsonNode message = root.path("message");
+            JsonCursor message = root.path("message");
             state.id = str(message, "id");
             state.model = str(message, "model");
             readUsage(message.path("usage"), state);
@@ -642,7 +663,7 @@ public class MultimodalChatRelay {
             return chunk;
         }
         if ("content_block_delta".equals(type)) {
-            JsonNode delta = root.path("delta");
+            JsonCursor delta = root.path("delta");
             if (!"text_delta".equals(str(delta, "type"))) {
                 // input_json_delta 是工具入参增量, 统一层没有对应的位置承载半截 JSON, 跳过.
                 return null;
@@ -664,7 +685,7 @@ public class MultimodalChatRelay {
         if ("error".equals(type)) {
             // 吞掉 error 帧会让客户端以为回答正常结束, 必须当失败上抛.
             throw GatewayException.upstreamFailed("anthropic stream error: "
-                    + root.path("error").path("message").asText("unknown"), null);
+                    + root.path("error").path("message").asText(), null);
         }
         return null;
     }
@@ -686,7 +707,7 @@ public class MultimodalChatRelay {
         return chunk;
     }
 
-    private static void readUsage(JsonNode usage, AnthropicStreamState state) {
+    private static void readUsage(JsonCursor usage, AnthropicStreamState state) {
         if (usage.isObject()) {
             long in = usage.path("input_tokens").asLong(0L);
             long out = usage.path("output_tokens").asLong(0L);
@@ -723,9 +744,9 @@ public class MultimodalChatRelay {
         }
     }
 
-    private static String str(JsonNode node, String field) {
-        JsonNode v = node.path(field);
-        return v.isTextual() ? v.asText() : null;
+    private static String str(JsonCursor node, String field) {
+        JsonCursor v = node.path(field);
+        return v.isScalar() && v.value() instanceof String ? v.asText() : null;
     }
 
     private UsageLedger.Record settle(ApiKey key, ModelRouter.Resolved resolved, UsageInfo usage) {

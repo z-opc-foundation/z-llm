@@ -1,7 +1,7 @@
 package com.zifang.z.llm.api.dto;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.zifang.util.json.annotation.JsonDeserialize;
+import com.zifang.util.json.annotation.JsonSerialize;
 
 import java.util.List;
 
@@ -11,20 +11,19 @@ import java.util.List;
  * <p>OpenAI 协议下每片就是一个 ChatCompletionChunk.
  * <p>Anthropic 协议下经 mapper 转成同结构 (event + delta).
  */
-@JsonInclude(JsonInclude.Include.NON_NULL)
 public class UnifiedStreamChunk {
 
     private String id;
     private String model;
     private Long created;
-    @JsonProperty("object")
     private String object;
 
     /**
      * 末片 usage — OpenAI 只有在请求带 stream_options.include_usage 时才回,
      * 此前本类根本没有该字段, 于是上游给的流式用量被丢掉, 客户端与网关都记不到账.
      */
-    @JsonProperty("usage")
+    @JsonSerialize(name = "usage")
+    @JsonDeserialize(name = "usage")
     private UsageInfo usage;
 
     /** 单 choice 增量 (含 delta). */

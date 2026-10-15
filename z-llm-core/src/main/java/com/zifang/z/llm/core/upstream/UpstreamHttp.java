@@ -1,6 +1,6 @@
 package com.zifang.z.llm.core.upstream;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import com.zifang.util.json.JsonCursor;
 
 import java.util.Map;
 import java.util.function.Consumer;
@@ -22,7 +22,7 @@ public interface UpstreamHttp {
      *
      * @throws com.zifang.z.agent.kernel.llm.support.LlmException 非 2xx (带上游 http status) 或 I/O 失败
      */
-    JsonNode postJson(String url, Map<String, String> headers, Object body);
+    JsonCursor postJson(String url, Map<String, String> headers, Object body);
 
     /**
      * SSE POST. 实现必须阻塞到流关闭或出错, 以便 failover 逻辑能在首块之前安全换凭据.

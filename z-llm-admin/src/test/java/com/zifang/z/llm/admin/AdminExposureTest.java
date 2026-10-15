@@ -1,6 +1,6 @@
 package com.zifang.z.llm.admin;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.util.json.JsonUtil;
 import com.zifang.z.llm.admin.config.ZLlmAdminAutoConfiguration;
 import com.zifang.z.llm.admin.controller.AdminController;
 import com.zifang.z.llm.admin.service.AdminQueryService;
@@ -76,6 +76,6 @@ public class AdminExposureTest {
         assertTrue(String.valueOf(rows.get(0).get("maskedKey")),
                 String.valueOf(rows.get(0).get("maskedKey")).contains("****"));
         // 序列化后的整体形状里都不该有原文 —— 只查一个字段会漏掉将来新增的透出.
-        assertFalse(new ObjectMapper().writeValueAsString(rows).contains(RAW_KEY));
+        assertFalse(JsonUtil.toJson(rows).contains(RAW_KEY));
     }
 }

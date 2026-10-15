@@ -1,8 +1,7 @@
 package com.zifang.z.llm.core.controller;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.zifang.util.json.JsonCursor;
+import com.zifang.util.json.JsonUtil;
 import com.zifang.z.llm.api.dto.ApiKey;
 import com.zifang.z.llm.api.dto.Choice;
 import com.zifang.z.llm.api.dto.UnifiedMessage;
@@ -30,7 +29,10 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -51,27 +53,25 @@ public class AnthropicController {
     private final ChatGatewayService gateway;
     private final ApiKeyService apiKeyService;
     private final RateLimiter rateLimiter;
-    private final ObjectMapper json;
     private final AnthropicRequestMapper mapper;
 
     public AnthropicController(ChatGatewayService gateway, ApiKeyService apiKeyService,
-                               RateLimiter rateLimiter, ObjectMapper json) {
+                               RateLimiter rateLimiter) {
         this.gateway = gateway;
         this.apiKeyService = apiKeyService;
         this.rateLimiter = rateLimiter;
-        this.json = json;
         this.mapper = new AnthropicRequestMapper();
     }
 
     @PostMapping(value = "/messages", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public void messages(@RequestBody JsonNode body,
+    public void messages(@RequestBody String body,
                          @RequestHeader(value = "anthropic-version", required = false) String apiVersion,
                          HttpServletRequest req,
                          HttpServletResponse resp) throws IOException {
         ApiKey key = AuthorizationExtractor.requireApiKey(req, apiKeyService);
         acquireOrThrow(key, resp);
         try {
-            UnifiedRequest unified = normalize(mapper.parse(body));
+            UnifiedRequest unified = normalize(mapper.parse(parseBody(body)));
             boolean stream = Boolean.TRUE.equals(unified.getStream()) || isStreamQueryParam(req);
             if (stream) {
                 streamMessages(unified, apiVersion, key, resp);
@@ -79,7 +79,7 @@ public class AnthropicController {
                 UnifiedResponse r = gateway.chat(unified, key).response();
                 resp.setContentType(MediaType.APPLICATION_JSON_VALUE);
                 resp.setCharacterEncoding("UTF-8");
-                resp.getWriter().write(json.writeValueAsString(toAnthropicResponse(r, apiVersion, 0L)));
+                resp.getWriter().write(JsonUtil.toJson(toAnthropicResponse(r, apiVersion, 0L)));
                 resp.getWriter().flush();
             }
         } finally {
@@ -95,17 +95,19 @@ public class AnthropicController {
      * 也不要让只依赖"端点存在"的客户端拿不到任何预算信号.
      */
     @PostMapping(value = "/messages/count_tokens", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<ObjectNode> countTokens(@RequestBody JsonNode body) {
-        UnifiedRequest unified = normalize(mapper.parse(body));
+    public ResponseEntity<Map<String, Object>> countTokens(@RequestBody String body) {
+        JsonCursor root0 = parseBody(body);
+        UnifiedRequest unified = normalize(mapper.parse(root0));
         long chars = textLen(unified.getMessages());
-        if (body.has("system")) {
-            chars += body.get("system").toString().length();
+        if (root0.has("system")) {
+            chars += JsonUtil.toJson(root0.path("system").value()).length();
         }
-        if (body.has("tools")) {
-            chars += body.get("tools").toString().length();
+        if (root0.has("tools")) {
+            chars += JsonUtil.toJson(root0.path("tools").value()).length();
         }
-        ObjectNode root = json.createObjectNode();
-        ObjectNode usage = root.putObject("usage");
+        Map<String, Object> root = new LinkedHashMap<>();
+        Map<String, Object> usage = new LinkedHashMap<>();
+        root.put("usage", usage);
         long inputTokens = (long) Math.ceil(chars / 4.0);
         usage.put("input_tokens", inputTokens);
         usage.put("cache_creation_input_tokens", 0);
@@ -136,26 +138,27 @@ public class AnthropicController {
         final String[] stopReason = new String[1];
 
         writeAnthropicEvent(writer, "message_start", buildMessageStart(messageId, unified.getModel(), apiVersion));
-        writeAnthropicEvent(writer, "ping", json.createObjectNode().put("type", "ping"));
+        writeAnthropicEvent(writer, "ping", one("type", "ping"));
 
         Runnable closeBlock = () -> {
             if (blockOpened.get() && blockClosed.compareAndSet(false, true)) {
-                writeAnthropicEvent(writer, "content_block_stop", json.createObjectNode().put("index", 0));
+                writeAnthropicEvent(writer, "content_block_stop", one("index", 0));
             }
         };
         Runnable finish = () -> {
             if (finished.compareAndSet(false, true)) {
                 closeBlock.run();
-                ObjectNode md = json.createObjectNode();
-                ObjectNode delta = json.createObjectNode();
+                Map<String, Object> md = new LinkedHashMap<>();
+                Map<String, Object> delta = new LinkedHashMap<>();
                 delta.put("stop_reason", stopReason[0] == null ? "end_turn" : mapFinish(stopReason[0]));
-                delta.put("stop_sequence", json.nullNode());
-                md.set("delta", delta);
-                ObjectNode usage = json.createObjectNode();
+                // 原来放的是显式 NullNode, Map 版本用 null 值等价 (写出去仍是 "stop_sequence":null).
+                delta.put("stop_sequence", null);
+                md.put("delta", delta);
+                Map<String, Object> usage = new LinkedHashMap<>();
                 usage.put("output_tokens", outputTokens[0]);
-                md.set("usage", usage);
+                md.put("usage", usage);
                 writeAnthropicEvent(writer, "message_delta", md);
-                writeAnthropicEvent(writer, "message_stop", json.createObjectNode());
+                writeAnthropicEvent(writer, "message_stop", new LinkedHashMap<String, Object>());
                 writer.flush();
             }
         };
@@ -165,20 +168,20 @@ public class AnthropicController {
                     String text = textOf(chunk);
                     if (text != null && !text.isEmpty()) {
                         if (blockOpened.compareAndSet(false, true)) {
-                            ObjectNode blockStart = json.createObjectNode();
-                            ObjectNode block = json.createObjectNode();
+                            Map<String, Object> blockStart = new LinkedHashMap<>();
+                            Map<String, Object> block = new LinkedHashMap<>();
                             block.put("type", "text");
                             block.put("text", "");
                             blockStart.put("index", 0);
-                            blockStart.set("content_block", block);
+                            blockStart.put("content_block", block);
                             writeAnthropicEvent(writer, "content_block_start", blockStart);
                         }
-                        ObjectNode delta = json.createObjectNode();
+                        Map<String, Object> delta = new LinkedHashMap<>();
                         delta.put("type", "text_delta");
                         delta.put("text", text);
-                        ObjectNode blockDelta = json.createObjectNode();
+                        Map<String, Object> blockDelta = new LinkedHashMap<>();
                         blockDelta.put("index", 0);
-                        blockDelta.set("delta", delta);
+                        blockDelta.put("delta", delta);
                         writeAnthropicEvent(writer, "content_block_delta", blockDelta);
                         outputTokens[0] += Math.max(1L, (long) Math.ceil(text.length() / 4.0));
                     }
@@ -192,9 +195,10 @@ public class AnthropicController {
                     if (!finished.get()) {
                         finished.set(true);
                         closeBlock.run();
-                        writeAnthropicEvent(writer, "error", json.createObjectNode()
-                                .put("type", "error")
-                                .put("message", err.getMessage() == null ? "stream error" : err.getMessage()));
+                        Map<String, Object> error = new LinkedHashMap<>();
+                        error.put("type", "error");
+                        error.put("message", err.getMessage() == null ? "stream error" : err.getMessage());
+                        writeAnthropicEvent(writer, "error", error);
                         writer.flush();
                     }
                 },
@@ -266,13 +270,27 @@ public class AnthropicController {
         }
     }
 
+    /**
+     * 自己按 String 收再解析 —— 不让 Spring 的 Jackson 转换器碰这条链路.
+     *
+     * <p>代价是"body 读坏"从 HttpMessageNotReadableException 变成 JsonUtil 抛的运行时异常,
+     * 所以这里显式翻回 400 invalid_request, 否则坏请求会退化成 500 (对外语义回归).
+     */
+    private static JsonCursor parseBody(String body) {
+        try {
+            return JsonCursor.of(JsonUtil.parse(body));
+        } catch (RuntimeException e) {
+            throw GatewayException.invalidRequest("request body is not valid JSON");
+        }
+    }
+
     private static boolean isStreamQueryParam(HttpServletRequest req) {
         String p = req.getParameter("stream");
         return p != null && ("true".equalsIgnoreCase(p) || "1".equals(p));
     }
 
-    private JsonNode toAnthropicResponse(UnifiedResponse resp, String apiVersion, long inputTokens) {
-        ObjectNode root = json.createObjectNode();
+    private Map<String, Object> toAnthropicResponse(UnifiedResponse resp, String apiVersion, long inputTokens) {
+        Map<String, Object> root = new LinkedHashMap<>();
         root.put("id", resp.getId() == null ? "msg_" + System.currentTimeMillis() : resp.getId());
         root.put("type", "message");
         root.put("role", "assistant");
@@ -281,7 +299,7 @@ public class AnthropicController {
             root.put("anthropic_version", apiVersion);
         }
 
-        com.fasterxml.jackson.databind.node.ArrayNode contentArr = json.createArrayNode();
+        List<Object> contentArr = new ArrayList<>();
         StringBuilder text = new StringBuilder();
         for (Choice c : safe(resp.getChoices())) {
             if (c.getMessage() == null || c.getMessage().getContent() == null) {
@@ -289,13 +307,13 @@ public class AnthropicController {
             }
             text.append(c.getMessage().getContent());
         }
-        if (text.length() > 0 || contentArr.size() == 0) {
-            ObjectNode block = json.createObjectNode();
+        if (text.length() > 0 || contentArr.isEmpty()) {
+            Map<String, Object> block = new LinkedHashMap<>();
             block.put("type", "text");
             block.put("text", text.toString());
             contentArr.add(block);
         }
-        root.set("content", contentArr);
+        root.put("content", contentArr);
 
         String stop = null;
         List<Choice> choices = resp.getChoices();
@@ -303,9 +321,9 @@ public class AnthropicController {
             stop = choices.get(0).getFinishReason();
         }
         root.put("stop_reason", stop == null ? "end_turn" : mapFinish(stop));
-        root.putNull("stop_sequence");
+        root.put("stop_sequence", null);
 
-        ObjectNode usage = json.createObjectNode();
+        Map<String, Object> usage = new LinkedHashMap<>();
         long in = inputTokens;
         long out = 0L;
         if (resp.getUsage() != null) {
@@ -318,8 +336,14 @@ public class AnthropicController {
         }
         usage.put("input_tokens", in);
         usage.put("output_tokens", out);
-        root.set("usage", usage);
+        root.put("usage", usage);
         return root;
+    }
+
+    private static Map<String, Object> one(String k, Object v) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put(k, v);
+        return m;
     }
 
     private static List<Choice> safe(List<Choice> in) {
@@ -334,8 +358,8 @@ public class AnthropicController {
         return s;
     }
 
-    private ObjectNode buildMessageStart(String messageId, String model, String apiVersion) {
-        ObjectNode msg = json.createObjectNode();
+    private Map<String, Object> buildMessageStart(String messageId, String model, String apiVersion) {
+        Map<String, Object> msg = new LinkedHashMap<>();
         msg.put("id", messageId);
         msg.put("type", "message");
         msg.put("role", "assistant");
@@ -343,27 +367,27 @@ public class AnthropicController {
         if (apiVersion != null) {
             msg.put("anthropic_version", apiVersion);
         }
-        com.fasterxml.jackson.databind.node.ArrayNode content = json.createArrayNode();
-        ObjectNode block = json.createObjectNode();
+        List<Object> content = new ArrayList<>();
+        Map<String, Object> block = new LinkedHashMap<>();
         block.put("type", "text");
         block.put("text", "");
         content.add(block);
-        msg.set("content", content);
-        msg.putNull("stop_reason");
-        msg.putNull("stop_sequence");
-        ObjectNode usage = json.createObjectNode();
+        msg.put("content", content);
+        msg.put("stop_reason", null);
+        msg.put("stop_sequence", null);
+        Map<String, Object> usage = new LinkedHashMap<>();
         usage.put("input_tokens", 0);
         usage.put("output_tokens", 0);
-        msg.set("usage", usage);
+        msg.put("usage", usage);
         return msg;
     }
 
-    private void writeAnthropicEvent(PrintWriter writer, String eventName, JsonNode data) {
+    private void writeAnthropicEvent(PrintWriter writer, String eventName, Map<String, Object> data) {
         try {
             writer.write("event: " + eventName + "\n");
-            writer.write("data: " + json.writeValueAsString(data) + "\n\n");
+            writer.write("data: " + JsonUtil.toJson(data) + "\n\n");
             writer.flush();
-        } catch (IOException e) {
+        } catch (RuntimeException e) {
             log.warn("SSE write failed: {}", e.getMessage());
         }
     }

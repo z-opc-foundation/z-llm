@@ -220,6 +220,27 @@
                 <artifactId>z-agent-kernel-tool</artifactId>
                 <version>${z-agent-kernel.version}</version>
             </dependency>
+
+            <!-- z-util 三条钉到 1.2.1 —— 继承来的 fleet BOM 把 z-util 钉在 1.0.22,
+                 那一版既没有已删除的 JsonMapperFactory, 也没有本次用到的
+                 JsonUtil.parse / toPlainValue / JsonCursor; 不在本地顶住就会编译不过。
+                 dsl-kernel 是 parser-json 的运行时同伴, 必须同一笔一起顶, 否则
+                 打进 classpath 的两个 z-util 版本会劈叉。 -->
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-util-core</artifactId>
+                <version>1.2.1</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-util-parser-json</artifactId>
+                <version>1.2.1</version>
+            </dependency>
+            <dependency>
+                <groupId>io.github.yuku123</groupId>
+                <artifactId>z-util-dsl-kernel</artifactId>
+                <version>1.2.1</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
     <dependencies>

@@ -1,7 +1,7 @@
 package com.zifang.z.llm.api.dto;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.zifang.util.json.annotation.JsonDeserialize;
+import com.zifang.util.json.annotation.JsonSerialize;
 
 import java.util.List;
 
@@ -10,7 +10,6 @@ import java.util.List;
  *
  * <p>流式场景用 UnifiedStreamChunk, 一片片吐出增量 delta.
  */
-@JsonInclude(JsonInclude.Include.NON_NULL)
 public class UnifiedResponse {
 
     /** 响应唯一 id (provider 生成, 透传). */
@@ -32,7 +31,8 @@ public class UnifiedResponse {
     private UsageInfo usage;
 
     /** 系统指纹 (OpenAI "sf", 可选). */
-    @JsonProperty("system_fingerprint")
+    @JsonSerialize(name = "system_fingerprint")
+    @JsonDeserialize(name = "system_fingerprint")
     private String systemFingerprint;
 
     public String getId() {

@@ -1,7 +1,7 @@
 package com.zifang.z.llm.core.support;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.util.json.JsonCursor;
+import com.zifang.util.json.JsonUtil;
 import com.zifang.z.llm.core.upstream.UpstreamHttp;
 
 import java.util.ArrayDeque;
@@ -19,21 +19,19 @@ import java.util.function.Consumer;
  */
 public class FakeUpstreamHttp implements UpstreamHttp {
 
-    private static final ObjectMapper JSON = new ObjectMapper();
-
     public static final class Call {
         public final String url;
         public final Map<String, String> headers;
-        public final JsonNode body;
+        public final JsonCursor body;
 
-        Call(String url, Map<String, String> headers, JsonNode body) {
+        Call(String url, Map<String, String> headers, JsonCursor body) {
             this.url = url;
             this.headers = headers;
             this.body = body;
         }
 
         /** 便捷取字段: call.body.path("input"). */
-        public JsonNode field(String name) {
+        public JsonCursor field(String name) {
             return body.path(name);
         }
 
@@ -62,7 +60,7 @@ public class FakeUpstreamHttp implements UpstreamHttp {
     /** 排队一个 JSON 响应 (字符串会被 parse). */
     public FakeUpstreamHttp enqueue(String json) {
         try {
-            replies.add(JSON.readTree(json));
+            replies.add(JsonCursor.of(JsonUtil.parse(json)));
         } catch (Exception e) {
             throw new IllegalArgumentException("bad fixture json: " + e.getMessage(), e);
         }
@@ -92,8 +90,8 @@ public class FakeUpstreamHttp implements UpstreamHttp {
     }
 
     @Override
-    public JsonNode postJson(String url, Map<String, String> headers, Object body) {
-        calls.add(new Call(url, headers, JSON.valueToTree(body)));
+    public JsonCursor postJson(String url, Map<String, String> headers, Object body) {
+        calls.add(new Call(url, headers, asCursor(body)));
         Object next = replies.poll();
         if (next == null) {
             throw new IllegalStateException("no queued upstream reply for " + url);
@@ -105,17 +103,22 @@ public class FakeUpstreamHttp implements UpstreamHttp {
             }
             throw new IllegalStateException(t);
         }
-        return (JsonNode) next;
+        return (JsonCursor) next;
     }
 
     @Override
     public void postSse(String url, Map<String, String> headers, Object body, Consumer<String> onData) {
-        calls.add(new Call(url, headers, JSON.valueToTree(body)));
+        calls.add(new Call(url, headers, asCursor(body)));
         if (sseFailure != null) {
             throw new IllegalStateException(sseFailure.getMessage(), sseFailure);
         }
         for (String frame : sseData) {
             onData.accept(frame);
         }
+    }
+
+    /** 出站体可能是 Map/List, 也可能是 POJO; 统一转成游标便于断言字段. */
+    private static JsonCursor asCursor(Object body) {
+        return JsonCursor.of(JsonUtil.parse(JsonUtil.toJson(body)));
     }
 }

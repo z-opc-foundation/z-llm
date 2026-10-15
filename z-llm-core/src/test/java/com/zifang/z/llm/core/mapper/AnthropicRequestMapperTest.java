@@ -1,7 +1,7 @@
 package com.zifang.z.llm.core.mapper;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.util.json.JsonCursor;
+import com.zifang.util.json.JsonUtil;
 import com.zifang.z.llm.api.dto.ContentPart;
 import com.zifang.z.llm.api.dto.ToolSpec;
 import com.zifang.z.llm.api.dto.UnifiedMessage;
@@ -14,7 +14,6 @@ import static org.junit.Assert.*;
 
 public class AnthropicRequestMapperTest {
 
-    private final ObjectMapper json = new ObjectMapper();
     private final AnthropicRequestMapper mapper = new AnthropicRequestMapper();
 
     @Test
@@ -27,7 +26,7 @@ public class AnthropicRequestMapperTest {
                 "    {\"role\":\"user\",\"content\":\"hi\"}\n" +
                 "  ]\n" +
                 "}";
-        JsonNode root = json.readTree(body);
+        JsonCursor root = JsonCursor.of(JsonUtil.parse(body));
         UnifiedRequest req = mapper.parse(root);
 
         assertEquals("claude-3-5-sonnet-latest", req.getModel());
@@ -60,7 +59,7 @@ public class AnthropicRequestMapperTest {
                 "    {\"name\":\"get_weather\",\"description\":\"get weather\",\"input_schema\":{\"type\":\"object\"}}\n" +
                 "  ]\n" +
                 "}";
-        UnifiedRequest req = mapper.parse(json.readTree(body));
+        UnifiedRequest req = mapper.parse(JsonCursor.of(JsonUtil.parse(body)));
         List<UnifiedMessage> msgs = req.getMessages();
         assertEquals(3, msgs.size());
 
@@ -102,7 +101,7 @@ public class AnthropicRequestMapperTest {
                 "    ]}\n" +
                 "  ]\n" +
                 "}";
-        UnifiedRequest req = mapper.parse(json.readTree(body));
+        UnifiedRequest req = mapper.parse(JsonCursor.of(JsonUtil.parse(body)));
         UnifiedMessage m = req.getMessages().get(0);
         assertEquals(1, m.getContents().size());
         ContentPart p = m.getContents().get(0);
@@ -118,7 +117,7 @@ public class AnthropicRequestMapperTest {
                 "  \"messages\": [{\"role\":\"user\",\"content\":\"hi\"}],\n" +
                 "  \"tool_choice\": {\"type\":\"tool\",\"name\":\"get_weather\"}\n" +
                 "}";
-        UnifiedRequest req = mapper.parse(json.readTree(body));
+        UnifiedRequest req = mapper.parse(JsonCursor.of(JsonUtil.parse(body)));
         assertNotNull(req.getToolChoice());
         assertTrue(req.getToolChoice() instanceof AnthropicRequestMapper.AnthropicToolChoiceRef);
         AnthropicRequestMapper.AnthropicToolChoiceRef ref =
@@ -135,7 +134,7 @@ public class AnthropicRequestMapperTest {
                 "  \"messages\": [{\"role\":\"user\",\"content\":\"hi\"}],\n" +
                 "  \"stop_sequences\": [\"END\", \"STOP\"]\n" +
                 "}";
-        UnifiedRequest req = mapper.parse(json.readTree(body));
+        UnifiedRequest req = mapper.parse(JsonCursor.of(JsonUtil.parse(body)));
         assertEquals(2, req.getStop().size());
         assertEquals("END", req.getStop().get(0));
     }

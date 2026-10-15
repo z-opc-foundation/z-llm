@@ -1,6 +1,5 @@
 package com.zifang.z.llm.starter.autoconfig;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zifang.z.llm.core.auth.AccessControl;
 import com.zifang.z.llm.core.credential.ApiKeyService;
 import com.zifang.z.llm.core.properties.GatewayProperties;
@@ -134,10 +133,4 @@ public class ZLlmAutoConfiguration {
         return service;
     }
 
-    /** ObjectMapper 由 Spring Boot 默认注册; 无 web-json 的容器下兜一个, 保证 controller 构造注入不断. */
-    @Bean
-    @ConditionalOnMissingBean(ObjectMapper.class)
-    public ObjectMapper zLlmObjectMapper() {
-        return new ObjectMapper();
-    }
 }

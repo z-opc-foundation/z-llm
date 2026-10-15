@@ -1,7 +1,7 @@
 package com.zifang.z.llm.core.mapper;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.util.json.JsonCursor;
+import com.zifang.util.json.JsonUtil;
 import com.zifang.z.llm.api.dto.ContentPart;
 import com.zifang.z.llm.api.dto.ToolSpec;
 import com.zifang.z.llm.api.dto.UnifiedMessage;
@@ -14,8 +14,7 @@ import static org.junit.Assert.*;
 
 public class OpenAIRequestMapperTest {
 
-    private final ObjectMapper json = new ObjectMapper();
-    private final OpenAIRequestMapper mapper = new OpenAIRequestMapper(json);
+    private final OpenAIRequestMapper mapper = new OpenAIRequestMapper();
 
     @Test
     public void parse_simple_text_chat() throws Exception {
@@ -29,7 +28,7 @@ public class OpenAIRequestMapperTest {
                 "  \"max_tokens\": 1024,\n" +
                 "  \"stream\": false\n" +
                 "}";
-        JsonNode root = json.readTree(body);
+        JsonCursor root = JsonCursor.of(JsonUtil.parse(body));
         UnifiedRequest req = mapper.parse(root);
 
         assertEquals("openai/gpt-4o", req.getModel());
@@ -54,7 +53,7 @@ public class OpenAIRequestMapperTest {
                 "    ]}\n" +
                 "  ]\n" +
                 "}";
-        JsonNode root = json.readTree(body);
+        JsonCursor root = JsonCursor.of(JsonUtil.parse(body));
         UnifiedRequest req = mapper.parse(root);
 
         List<UnifiedMessage> msgs = req.getMessages();
@@ -88,7 +87,7 @@ public class OpenAIRequestMapperTest {
                 "  ],\n" +
                 "  \"tool_choice\": \"auto\"\n" +
                 "}";
-        JsonNode root = json.readTree(body);
+        JsonCursor root = JsonCursor.of(JsonUtil.parse(body));
         UnifiedRequest req = mapper.parse(root);
 
         List<ToolSpec> tools = req.getTools();
@@ -119,7 +118,7 @@ public class OpenAIRequestMapperTest {
                 "  \"messages\": [{\"role\":\"user\",\"content\":\"hi\"}],\n" +
                 "  \"stop\": [\"END\", \"STOP\"]\n" +
                 "}";
-        UnifiedRequest req = mapper.parse(json.readTree(body));
+        UnifiedRequest req = mapper.parse(JsonCursor.of(JsonUtil.parse(body)));
         assertNotNull(req.getStop());
         assertEquals(2, req.getStop().size());
         assertEquals("END", req.getStop().get(0));
@@ -133,7 +132,7 @@ public class OpenAIRequestMapperTest {
                 "  \"messages\": [{\"role\":\"user\",\"content\":\"hi\"}],\n" +
                 "  \"stop\": \"END\"\n" +
                 "}";
-        UnifiedRequest req = mapper.parse(json.readTree(body));
+        UnifiedRequest req = mapper.parse(JsonCursor.of(JsonUtil.parse(body)));
         assertEquals(1, req.getStop().size());
         assertEquals("END", req.getStop().get(0));
     }

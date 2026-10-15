@@ -1,7 +1,7 @@
 package com.zifang.z.llm.api.dto;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
-import com.fasterxml.jackson.annotation.JsonProperty;
+import com.zifang.util.json.annotation.JsonDeserialize;
+import com.zifang.util.json.annotation.JsonSerialize;
 
 /**
  * 单 choice — 对应一次候选结果.
@@ -9,7 +9,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * <p>非流式: message 字段填充完整回复.
  * <p>流式: message 字段为 null, delta 字段填充增量.
  */
-@JsonInclude(JsonInclude.Include.NON_NULL)
 public class Choice {
 
     /** choice 索引 (多数 vendor 只有一个, index=0). */
@@ -22,7 +21,8 @@ public class Choice {
     private Delta delta;
 
     /** 停止原因: "stop" / "length" / "tool_calls" / "content_filter" 等. */
-    @JsonProperty("finish_reason")
+    @JsonSerialize(name = "finish_reason")
+    @JsonDeserialize(name = "finish_reason")
     private String finishReason;
 
     public Choice() {
@@ -66,8 +66,9 @@ public class Choice {
     public static class Delta {
         private String role;
         private String content;
-        @JsonProperty("tool_calls")
-    private java.util.List<ToolCall> toolCalls;
+        @JsonSerialize(name = "tool_calls")
+        @JsonDeserialize(name = "tool_calls")
+        private java.util.List<ToolCall> toolCalls;
 
         public String getRole() {
             return role;

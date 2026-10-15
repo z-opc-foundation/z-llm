@@ -1,6 +1,6 @@
 package com.zifang.z.llm.core.controller;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.util.json.JsonCursor;
 import com.zifang.z.agent.kernel.llm.support.LlmException;
 import com.zifang.z.llm.api.dto.ApiKey;
 import com.zifang.z.llm.api.dto.Vendor;
@@ -101,15 +101,13 @@ public class GatewayHttpProtocolTest {
 
         ApiKeyService apiKeyService = new ApiKeyService(props);
         apiKeyService.afterPropertiesSet();
-        ObjectMapper json = new ObjectMapper();
-
-        openaiController = new OpenAIController(service, apiKeyService, rateLimiter, json, router,
+        openaiController = new OpenAIController(service, apiKeyService, rateLimiter, router,
                 embeddingService);
         openaiMvc = MockMvcBuilders.standaloneSetup(openaiController)
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .build();
         anthropicMvc = MockMvcBuilders.standaloneSetup(
-                        new AnthropicController(service, apiKeyService, rateLimiter, json))
+                        new AnthropicController(service, apiKeyService, rateLimiter))
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .build();
     }
@@ -490,12 +488,12 @@ public class GatewayHttpProtocolTest {
         assertEquals("kernel provider 不该被碰 (它传不了图)", 0, openai.chatCalls());
         FakeUpstreamHttp.Call call = upstream.lastCall();
         assertTrue(call.url.endsWith("/v1/chat/completions"));
-        com.fasterxml.jackson.databind.JsonNode content =
-                call.field("messages").get(0).path("content");
+        JsonCursor content =
+                call.field("messages").at(0).path("content");
         assertTrue("content 必须是多模态数组", content.isArray());
-        assertEquals("what is this", content.get(0).path("text").asText());
-        assertEquals("https://x/y.png", content.get(1).path("image_url").path("url").asText());
-        assertEquals("low", content.get(1).path("image_url").path("detail").asText());
+        assertEquals("what is this", content.at(0).path("text").asText());
+        assertEquals("https://x/y.png", content.at(1).path("image_url").path("url").asText());
+        assertEquals("low", content.at(1).path("image_url").path("detail").asText());
         assertFalse("转发请求不能带网关侧命名空间", call.field("model").asText().contains("openai/"));
         ApiKey k1 = TestFixtures.key("k1", "sk-live-1", null, null);
         assertEquals(13L, ledger.totalTokens(k1));
@@ -548,7 +546,7 @@ public class GatewayHttpProtocolTest {
         assertEquals("3 帧内容 + 1 个 [DONE]", 4, countOccurrences(body, "data:"));
         assertTrue("上游裸名要补回命名空间: " + body, body.contains("openai/gpt-4o"));
         assertTrue("流式末片 usage 必须透传: " + body, body.contains("\"total_tokens\":13"));
-        assertTrue("出站体必须带 stream", upstream.lastCall().field("stream").asBoolean());
+        assertTrue("出站体必须带 stream", upstream.lastCall().field("stream").asBoolean(false));
         assertEquals(0, openai.chatCalls());
     }
 
@@ -582,14 +580,14 @@ public class GatewayHttpProtocolTest {
                 call.url.endsWith("/v1/messages"));
         assertEquals("Messages API 只认 x-api-key", "sk-test-ak-anth", call.header("x-api-key"));
         assertNull("发 Bearer 会被上游当成缺 key", call.header("Authorization"));
-        assertEquals("max_tokens 是 Messages API 的必填项", 8192, call.field("max_tokens").asInt());
+        assertEquals("max_tokens 是 Messages API 的必填项", 8192, call.field("max_tokens").asInt(0));
 
-        com.fasterxml.jackson.databind.JsonNode msg = call.field("messages").get(0);
+        JsonCursor msg = call.field("messages").at(0);
         assertEquals("user", msg.path("role").asText());
-        com.fasterxml.jackson.databind.JsonNode content = msg.path("content");
+        JsonCursor content = msg.path("content");
         assertTrue("带图必须用 block 数组", content.isArray());
-        assertEquals("image", content.get(1).path("type").asText());
-        com.fasterxml.jackson.databind.JsonNode source = content.get(1).path("source");
+        assertEquals("image", content.at(1).path("type").asText());
+        JsonCursor source = content.at(1).path("source");
         assertEquals("base64", source.path("type").asText());
         assertEquals("image/png", source.path("media_type").asText());
         assertEquals("AAA=", source.path("data").asText());
@@ -625,9 +623,9 @@ public class GatewayHttpProtocolTest {
         FakeUpstreamHttp.Call call = upstream.lastCall();
         assertEquals("system 必须提到顶层", "be terse", call.field("system").asText());
         assertEquals("system 不该留在 messages 里 (上游会 400)", 1, call.field("messages").size());
-        assertEquals("调用方给的 max_tokens 不能被默认值盖掉", 64, call.field("max_tokens").asInt());
-        com.fasterxml.jackson.databind.JsonNode source =
-                call.field("messages").get(0).path("content").get(1).path("source");
+        assertEquals("调用方给的 max_tokens 不能被默认值盖掉", 64, call.field("max_tokens").asInt(0));
+        JsonCursor source =
+                call.field("messages").at(0).path("content").at(1).path("source");
         assertEquals("image/jpeg", source.path("media_type").asText());
         assertEquals("//9z", source.path("data").asText());
     }
@@ -661,7 +659,7 @@ public class GatewayHttpProtocolTest {
         assertTrue(body.contains("event: message_stop"));
         assertFalse("不该出现错误帧", body.contains("event: error"));
         assertEquals("外链 source 的 url 不能被丢", "https://x/y.png",
-                upstream.lastCall().field("messages").get(0).path("content").get(0)
+                upstream.lastCall().field("messages").at(0).path("content").at(0)
                         .path("source").path("url").asText());
     }
 

@@ -70,7 +70,7 @@ public class EmbeddingServiceTest {
         FakeUpstreamHttp.Call call = upstream.lastCall();
         assertTrue("DashScope 原生端点: " + call.url,
                 call.url.endsWith("/services/embeddings/text-embedding/text-embedding"));
-        assertEquals("a", call.field("input").path("texts").get(0).asText());
+        assertEquals("a", call.field("input").path("texts").at(0).asText());
         assertEquals(2, call.field("input").path("texts").size());
         // 上游乱序回 text_index 时必须按索引排回去, 否则向量会配错文本.
         assertEquals(0.1, out.getData().get(0).getEmbedding().get(0), 1e-9);
@@ -90,8 +90,8 @@ public class EmbeddingServiceTest {
                 call.url.endsWith("/v1beta/models/gemini-embedding-001:batchEmbedContents"));
         assertEquals(2, call.field("requests").size());
         assertEquals("models/gemini-embedding-001",
-                call.field("requests").get(0).path("model").asText());
-        assertEquals("a", call.field("requests").get(0).path("content").path("parts").get(0)
+                call.field("requests").at(0).path("model").asText());
+        assertEquals("a", call.field("requests").at(0).path("content").path("parts").at(0)
                 .path("text").asText());
         assertEquals(0.75, out.getData().get(1).getEmbedding().get(1), 1e-9);
     }

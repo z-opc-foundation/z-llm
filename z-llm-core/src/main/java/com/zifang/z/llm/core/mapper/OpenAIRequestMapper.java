@@ -1,14 +1,13 @@
 package com.zifang.z.llm.core.mapper;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.zifang.util.json.JsonCursor;
+import com.zifang.util.json.JsonUtil;
 import com.zifang.z.llm.api.dto.ContentPart;
 import com.zifang.z.llm.api.dto.ToolSpec;
 import com.zifang.z.llm.api.dto.UnifiedMessage;
 import com.zifang.z.llm.api.dto.UnifiedRequest;
 
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -22,13 +21,7 @@ import java.util.Map;
  */
 public class OpenAIRequestMapper {
 
-    private final ObjectMapper json;
-
-    public OpenAIRequestMapper(ObjectMapper json) {
-        this.json = json;
-    }
-
-    public UnifiedRequest parse(JsonNode root) {
+    public UnifiedRequest parse(JsonCursor root) {
         UnifiedRequest req = new UnifiedRequest();
         req.setModel(textOrNull(root, "model"));
         req.setTemperature(doubleOrNull(root, "temperature"));
@@ -39,65 +32,68 @@ public class OpenAIRequestMapper {
         req.setPresencePenalty(doubleOrNull(root, "presence_penalty"));
         req.setUser(textOrNull(root, "user"));
 
-        JsonNode stopNode = root.path("stop");
+        JsonCursor stopNode = root.path("stop");
         if (stopNode.isArray()) {
             List<String> stops = new ArrayList<>();
-            stopNode.forEach(n -> stops.add(n.asText()));
+            for (JsonCursor n : stopNode.elements()) {
+                stops.add(n.asText());
+            }
             req.setStop(stops);
-        } else if (stopNode.isTextual()) {
+        } else if (isTextual(stopNode)) {
             List<String> stops = new ArrayList<>();
             stops.add(stopNode.asText());
             req.setStop(stops);
         }
 
-        JsonNode msgArr = root.path("messages");
+        JsonCursor msgArr = root.path("messages");
         if (msgArr.isArray()) {
             List<UnifiedMessage> msgs = new ArrayList<>();
-            for (Iterator<JsonNode> it = msgArr.elements(); it.hasNext(); ) {
-                msgs.add(parseMessage(it.next()));
+            for (JsonCursor m : msgArr.elements()) {
+                msgs.add(parseMessage(m));
             }
             req.setMessages(msgs);
         }
 
-        JsonNode toolsArr = root.path("tools");
+        JsonCursor toolsArr = root.path("tools");
         if (toolsArr.isArray()) {
             List<ToolSpec> tools = new ArrayList<>();
-            for (Iterator<JsonNode> it = toolsArr.elements(); it.hasNext(); ) {
-                tools.add(parseTool(it.next()));
+            for (JsonCursor t : toolsArr.elements()) {
+                tools.add(parseTool(t));
             }
             req.setTools(tools);
         }
 
-        JsonNode tc = root.path("tool_choice");
-        if (!tc.isMissingNode() && !tc.isNull()) {
-            if (tc.isTextual()) {
+        JsonCursor tc = root.path("tool_choice");
+        if (!tc.isMissing() && !tc.isNull()) {
+            if (isTextual(tc)) {
                 req.setToolChoice(tc.asText());
             } else {
-                req.setToolChoice(json.convertValue(tc, Object.class));
+                // 原来走的是 convertValue(tc, Object.class), 目标是 Object 就等于把节点转成
+                // 普通 Map/List, 所以这里直接深展开, 不能给 JsonUtil.toPlainValue 之外的浅层结果.
+                req.setToolChoice(JsonUtil.toPlainValue(tc.value()));
             }
         }
 
         return req;
     }
 
-    private UnifiedMessage parseMessage(JsonNode m) {
+    private UnifiedMessage parseMessage(JsonCursor m) {
         UnifiedMessage um = new UnifiedMessage();
         um.setRole(textOrNull(m, "role"));
         um.setName(textOrNull(m, "name"));
         um.setToolCallId(textOrNull(m, "tool_call_id"));
 
-        JsonNode content = m.path("content");
-        if (content.isTextual() || content.isNull()) {
+        JsonCursor content = m.path("content");
+        if (isTextual(content) || content.isNull()) {
             um.setContent(content.isNull() ? null : content.asText());
         } else if (content.isArray()) {
             List<ContentPart> parts = new ArrayList<>();
-            for (Iterator<JsonNode> it = content.elements(); it.hasNext(); ) {
-                JsonNode p = it.next();
+            for (JsonCursor p : content.elements()) {
                 ContentPart cp = new ContentPart();
                 cp.setType(textOrNull(p, "type"));
                 cp.setText(textOrNull(p, "text"));
-                JsonNode iu = p.path("image_url");
-                if (!iu.isMissingNode() && !iu.isNull()) {
+                JsonCursor iu = p.path("image_url");
+                if (!iu.isMissing() && !iu.isNull()) {
                     ContentPart.ImageUrl img = new ContentPart.ImageUrl();
                     img.setUrl(textOrNull(iu, "url"));
                     img.setDetail(textOrNull(iu, "detail"));
@@ -108,23 +104,23 @@ public class OpenAIRequestMapper {
             um.setContents(parts);
         }
 
-        JsonNode tcArr = m.path("tool_calls");
+        JsonCursor tcArr = m.path("tool_calls");
         if (tcArr.isArray() && tcArr.size() > 0) {
             List<com.zifang.z.llm.api.dto.ToolCall> tcs = new ArrayList<>();
-            for (Iterator<JsonNode> it = tcArr.elements(); it.hasNext(); ) {
-                tcs.add(parseToolCall(it.next()));
+            for (JsonCursor t : tcArr.elements()) {
+                tcs.add(parseToolCall(t));
             }
             um.setToolCalls(tcs);
         }
         return um;
     }
 
-    private com.zifang.z.llm.api.dto.ToolCall parseToolCall(JsonNode t) {
+    private com.zifang.z.llm.api.dto.ToolCall parseToolCall(JsonCursor t) {
         com.zifang.z.llm.api.dto.ToolCall tc = new com.zifang.z.llm.api.dto.ToolCall();
         tc.setId(textOrNull(t, "id"));
         tc.setType(textOrNull(t, "type"));
-        JsonNode fn = t.path("function");
-        if (!fn.isMissingNode() && !fn.isNull()) {
+        JsonCursor fn = t.path("function");
+        if (!fn.isMissing() && !fn.isNull()) {
             com.zifang.z.llm.api.dto.ToolCall.FunctionCall f = new com.zifang.z.llm.api.dto.ToolCall.FunctionCall();
             f.setName(textOrNull(fn, "name"));
             f.setArguments(textOrNull(fn, "arguments"));
@@ -133,40 +129,52 @@ public class OpenAIRequestMapper {
         return tc;
     }
 
-    private ToolSpec parseTool(JsonNode t) {
+    private ToolSpec parseTool(JsonCursor t) {
         ToolSpec ts = new ToolSpec();
         ts.setType(textOrNull(t, "type"));
-        JsonNode fn = t.path("function");
-        if (!fn.isMissingNode() && !fn.isNull()) {
+        JsonCursor fn = t.path("function");
+        if (!fn.isMissing() && !fn.isNull()) {
             ToolSpec.FunctionSpec fs = new ToolSpec.FunctionSpec();
             fs.setName(textOrNull(fn, "name"));
             fs.setDescription(textOrNull(fn, "description"));
-            JsonNode params = fn.path("parameters");
-            if (!params.isMissingNode() && params.isObject()) {
-                fs.setParameters(json.convertValue(params, Map.class));
+            JsonCursor params = fn.path("parameters");
+            if (!params.isMissing() && params.isObject()) {
+                // 原来的 convertValue(params, Map.class) 产出的是深展开的 LinkedHashMap,
+                // 而 JsonUtil.parseToMap 是浅的 (嵌套值仍是 JsonObject), 所以必须用 toPlainValue.
+                fs.setParameters(asStringMap(JsonUtil.toPlainValue(params.value())));
             }
             ts.setFunction(fs);
         }
         return ts;
     }
 
-    private static String textOrNull(JsonNode n, String f) {
-        JsonNode v = n.get(f);
-        return v == null || v.isNull() ? null : v.asText();
+    /** JsonCursor 没有 isTextual, 用底层值的类型判断. */
+    private static boolean isTextual(JsonCursor n) {
+        return n.isScalar() && n.value() instanceof String;
     }
 
-    private static Double doubleOrNull(JsonNode n, String f) {
-        JsonNode v = n.get(f);
-        return v == null || v.isNull() ? null : v.asDouble();
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asStringMap(Object plain) {
+        return (Map<String, Object>) plain;
     }
 
-    private static Integer intOrNull(JsonNode n, String f) {
-        JsonNode v = n.get(f);
-        return v == null || v.isNull() ? null : v.asInt();
+    private static String textOrNull(JsonCursor n, String f) {
+        JsonCursor v = n.path(f);
+        return v.isMissing() || v.isNull() ? null : v.asText();
     }
 
-    private static Boolean boolOrNull(JsonNode n, String f) {
-        JsonNode v = n.get(f);
-        return v == null || v.isNull() ? null : v.asBoolean();
+    private static Double doubleOrNull(JsonCursor n, String f) {
+        JsonCursor v = n.path(f);
+        return v.isMissing() || v.isNull() ? null : v.asDouble(0D);
+    }
+
+    private static Integer intOrNull(JsonCursor n, String f) {
+        JsonCursor v = n.path(f);
+        return v.isMissing() || v.isNull() ? null : v.asInt(0);
+    }
+
+    private static Boolean boolOrNull(JsonCursor n, String f) {
+        JsonCursor v = n.path(f);
+        return v.isMissing() || v.isNull() ? null : v.asBoolean(false);
     }
 }

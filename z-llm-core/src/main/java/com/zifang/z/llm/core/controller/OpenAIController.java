@@ -1,9 +1,7 @@
 package com.zifang.z.llm.core.controller;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.zifang.util.json.JsonCursor;
+import com.zifang.util.json.JsonUtil;
 import com.zifang.z.agent.kernel.llm.Model;
 import com.zifang.z.llm.api.dto.ApiKey;
 import com.zifang.z.llm.api.dto.EmbeddingsRequest;
@@ -36,6 +34,9 @@ import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -56,19 +57,17 @@ public class OpenAIController {
     private final ChatGatewayService gateway;
     private final ApiKeyService apiKeyService;
     private final RateLimiter rateLimiter;
-    private final ObjectMapper json;
     private final OpenAIRequestMapper mapper;
     private final ModelRouter modelRouter;
     private final EmbeddingService embeddingService;
 
     public OpenAIController(ChatGatewayService gateway, ApiKeyService apiKeyService,
-                            RateLimiter rateLimiter, ObjectMapper json, ModelRouter modelRouter,
+                            RateLimiter rateLimiter, ModelRouter modelRouter,
                             EmbeddingService embeddingService) {
         this.gateway = gateway;
         this.apiKeyService = apiKeyService;
         this.rateLimiter = rateLimiter;
-        this.json = json;
-        this.mapper = new OpenAIRequestMapper(json);
+        this.mapper = new OpenAIRequestMapper();
         this.modelRouter = modelRouter;
         this.embeddingService = embeddingService;
     }
@@ -82,13 +81,13 @@ public class OpenAIController {
      * 为兼容既有调用方, {@code ?stream=true} 仍然有效.
      */
     @PostMapping(value = "/chat/completions", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public void chatCompletions(@RequestBody JsonNode body,
+    public void chatCompletions(@RequestBody String body,
                                HttpServletRequest req,
                                HttpServletResponse resp) throws IOException {
         ApiKey key = AuthorizationExtractor.requireApiKey(req, apiKeyService);
         acquireOrThrow(key, resp);
         try {
-            UnifiedRequest unified = mapper.parse(body);
+            UnifiedRequest unified = mapper.parse(parseBody(body));
             boolean stream = Boolean.TRUE.equals(unified.getStream())
                     || isStreamQueryParam(req);
             if (stream) {
@@ -106,7 +105,9 @@ public class OpenAIController {
         ChatGatewayService.ChatOutcome outcome = gateway.chat(unified, key);
         resp.setContentType(MediaType.APPLICATION_JSON_VALUE);
         resp.setCharacterEncoding("UTF-8");
-        resp.getWriter().write(json.writeValueAsString(outcome.response()));
+        // UnifiedResponse 原本靠类级 @JsonInclude(NON_NULL) 丢 null 字段, 那份注解已随
+        // DTO 迁移删除, 所以这里改用 toJsonExcludingNulls 保住同样的线上字节.
+        resp.getWriter().write(JsonUtil.toJsonExcludingNulls(outcome.response()));
         resp.getWriter().flush();
     }
 
@@ -136,9 +137,10 @@ public class OpenAIController {
                     try {
                         ErrorResponse er = new ErrorResponse(
                                 messageOf(err), "upstream_error", "stream_failed");
-                        writer.write("data: " + json.writeValueAsString(er) + "\n\n");
+                        // ErrorResponse 没有 NON_NULL 语义, 用 toJson 保持与原 mapper 一致.
+                        writer.write("data: " + JsonUtil.toJson(er) + "\n\n");
                         writer.flush();
-                    } catch (IOException ignore) {
+                    } catch (RuntimeException ignore) {
                     } finally {
                         finish.run();
                     }
@@ -169,13 +171,15 @@ public class OpenAIController {
     }
 
     @GetMapping(value = "/models", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<ObjectNode> models() {
-        ObjectNode root = json.createObjectNode();
+    public ResponseEntity<Map<String, Object>> models() {
+        Map<String, Object> root = new LinkedHashMap<>();
         root.put("object", "list");
-        ArrayNode data = root.putArray("data");
+        List<Object> data = new ArrayList<>();
+        root.put("data", data);
         for (Map.Entry<String, ModelRouter.ModelCard> e : modelRouter.availableModels().entrySet()) {
             Model m = e.getValue().model();
-            ObjectNode node = data.addObject();
+            Map<String, Object> node = new LinkedHashMap<>();
+            data.add(node);
             node.put("id", e.getKey());
             node.put("object", "model");
             node.put("created", System.currentTimeMillis() / 1000L);
@@ -183,14 +187,19 @@ public class OpenAIController {
             if (m.getDisplayName() != null) {
                 node.put("display_name", m.getDisplayName());
             }
-            ArrayNode caps = node.putArray("capabilities");
-            for (Model.Capability c : m.getCapabilities()) {
-                caps.add(c.name().toLowerCase());
-            }
+            node.put("capabilities", capabilityNames(m));
             node.put("context_window", m.getContextWindow());
             node.put("max_output_tokens", m.getMaxOutputTokens());
         }
         return ResponseEntity.ok(root);
+    }
+
+    private static List<Object> capabilityNames(Model m) {
+        List<Object> caps = new ArrayList<>();
+        for (Model.Capability c : m.getCapabilities()) {
+            caps.add(c.name().toLowerCase());
+        }
+        return caps;
     }
 
     /**
@@ -200,7 +209,7 @@ public class OpenAIController {
      * (网关侧还有 "openai/gpt-4o" 这种命名空间写法), 单个路径变量匹配不到多段.
      */
     @GetMapping(value = "/models/**", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<?> model(HttpServletRequest req) {
+    public ResponseEntity<Map<String, Object>> model(HttpServletRequest req) {
         String id = pathAfterModels(req);
         Map<String, ModelRouter.ModelCard> cards = modelRouter.availableModels();
         ModelRouter.ModelCard card = cards.get(id);
@@ -215,18 +224,17 @@ public class OpenAIController {
         if (card == null) {
             throw GatewayException.modelNotFound(id);
         }
-        ObjectNode node = json.createObjectNode();
+        Map<String, Object> node = new LinkedHashMap<>();
         Model m = card.model();
         node.put("id", id);
         node.put("object", "model");
         node.put("owned_by", m.getProvider() == null ? card.vendor().code() : m.getProvider());
+        // 这里是 put 而不是 putIfPresent: 原来 ObjectNode.put(k, null) 会写出显式 null,
+        // 换成 Map 后行为一致 (Spring 的 Jackson 默认也会把 null 值写出去).
         node.put("display_name", m.getDisplayName());
         node.put("context_window", m.getContextWindow());
         node.put("max_output_tokens", m.getMaxOutputTokens());
-        ArrayNode caps = node.putArray("capabilities");
-        for (Model.Capability c : m.getCapabilities()) {
-            caps.add(c.name().toLowerCase());
-        }
+        node.put("capabilities", capabilityNames(m));
         return ResponseEntity.ok(node);
     }
 
@@ -251,6 +259,20 @@ public class OpenAIController {
         }
     }
 
+    /**
+     * 自己按 String 收再解析 —— 不让 Spring 的 Jackson 转换器碰这条链路.
+     *
+     * <p>代价是"body 读坏"从 HttpMessageNotReadableException 变成 JsonUtil 抛的运行时异常,
+     * 所以这里显式翻回 400 invalid_request, 否则坏请求会退化成 500 (对外语义回归).
+     */
+    private static JsonCursor parseBody(String body) {
+        try {
+            return JsonCursor.of(JsonUtil.parse(body));
+        } catch (RuntimeException e) {
+            throw GatewayException.invalidRequest("request body is not valid JSON");
+        }
+    }
+
     private static boolean isStreamQueryParam(HttpServletRequest req) {
         String p = req.getParameter("stream");
         return p != null && ("true".equalsIgnoreCase(p) || "1".equals(p));
@@ -262,9 +284,9 @@ public class OpenAIController {
 
     private void writeSse(PrintWriter writer, com.zifang.z.llm.api.dto.UnifiedStreamChunk chunk) {
         try {
-            writer.write("data: " + json.writeValueAsString(chunk) + "\n\n");
+            writer.write("data: " + JsonUtil.toJsonExcludingNulls(chunk) + "\n\n");
             writer.flush();
-        } catch (IOException e) {
+        } catch (RuntimeException e) {
             log.warn("SSE write failed: {}", e.getMessage());
         }
     }

@@ -99,7 +99,13 @@
             <artifactId>javax.servlet-api</artifactId>
         </dependency>
 
-        <!-- Jackson (JSON 编解码) -->
+        <!-- JSON 编解码: 网关自身一律走 z-util 的 JsonUtil / JsonCursor。
+             jackson-databind 只为 Spring MVC 的 @RequestBody 绑定保留 (EmbeddingsRequest
+             是 MVC 出口的 DTO, 它的 @JsonProperty 仍然活着), 不再被本仓代码直接引用。 -->
+        <dependency>
+            <groupId>io.github.yuku123</groupId>
+            <artifactId>z-util-parser-json</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>

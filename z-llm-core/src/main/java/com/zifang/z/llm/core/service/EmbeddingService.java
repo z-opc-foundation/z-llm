@@ -1,9 +1,6 @@
 package com.zifang.z.llm.core.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.zifang.util.json.JsonCursor;
 import com.zifang.z.llm.api.dto.ApiKey;
 import com.zifang.z.llm.api.dto.EmbeddingsRequest;
 import com.zifang.z.llm.api.dto.EmbeddingsResponse;
@@ -24,7 +21,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * {@code POST /v1/embeddings} —— 网关侧向量化.
@@ -49,7 +48,6 @@ public class EmbeddingService {
     private final RateLimiter rateLimiter;
     private final AccessControl accessControl;
     private final UpstreamHttp http;
-    private final ObjectMapper json = new ObjectMapper();
 
     public EmbeddingService(GatewayProperties properties,
                             LlmCredentialStore credentialStore,
@@ -95,7 +93,7 @@ public class EmbeddingService {
                     "vendor " + vendor.code() + " has no embeddings endpoint");
         }
 
-        JsonNode raw = invoker.execute(vendor, invoker.attemptsFor(vendor), h -> {
+        JsonCursor raw = invoker.execute(vendor, invoker.attemptsFor(vendor), h -> {
             LlmCredential cred = credentialStore.findByAlias(h.alias());
             if (cred == null) {
                 throw GatewayException.internal("credential " + h.alias() + " vanished", null);
@@ -173,31 +171,37 @@ public class EmbeddingService {
 
     // ---- 各家请求体 ----
 
-    ObjectNode buildBody(Vendor vendor, String bare, List<String> inputs, EmbeddingsRequest req) {
-        ObjectNode body = json.createObjectNode();
+    Map<String, Object> buildBody(Vendor vendor, String bare, List<String> inputs, EmbeddingsRequest req) {
+        Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", bare);
         switch (vendor) {
             case DASHSCOPE:
                 // 原生形状: input 是对象 {texts: [...]}, 与 OpenAI 的裸数组不同.
-                ObjectNode input = body.putObject("input");
-                addAll(input.putArray("texts"), inputs);
-                body.putObject("parameters");
+                Map<String, Object> input = new LinkedHashMap<>();
+                body.put("input", input);
+                input.put("texts", new ArrayList<Object>(inputs));
+                // 原来是一个空对象, 这里保持同形状.
+                body.put("parameters", new LinkedHashMap<String, Object>());
                 break;
             case GEMINI:
-                ArrayNode requests = body.putArray("requests");
+                List<Object> requests = new ArrayList<>();
+                body.put("requests", requests);
                 for (String text : inputs) {
-                    ObjectNode r = requests.addObject();
+                    Map<String, Object> r = new LinkedHashMap<>();
+                    requests.add(r);
                     r.put("model", "models/" + bare);
-                    ObjectNode content = r.putObject("content");
-                    ArrayNode parts = content.putArray("parts");
-                    parts.addObject().put("text", text);
+                    Map<String, Object> content = new LinkedHashMap<>();
+                    r.put("content", content);
+                    List<Object> parts = new ArrayList<>();
+                    content.put("parts", parts);
+                    parts.add(one("text", text));
                     if (req.getDimensions() != null) {
                         r.put("outputDimensionality", req.getDimensions());
                     }
                 }
                 break;
             default:
-                addAll(body.putArray("input"), inputs);
+                body.put("input", new ArrayList<Object>(inputs));
                 if (req.getDimensions() != null) {
                     body.put("dimensions", req.getDimensions());
                 }
@@ -212,28 +216,28 @@ public class EmbeddingService {
         return body;
     }
 
-    private static void addAll(ArrayNode arr, List<String> values) {
-        for (String v : values) {
-            arr.add(v);
-        }
+    private static Map<String, Object> one(String k, Object v) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put(k, v);
+        return m;
     }
 
     // ---- 各家响应体 ----
 
-    EmbeddingsResponse parse(Vendor vendor, JsonNode raw, int expected) {
-        if (raw == null || raw.isNull() || raw.isMissingNode()) {
+    EmbeddingsResponse parse(Vendor vendor, JsonCursor raw, int expected) {
+        if (raw == null || raw.isNull() || raw.isMissing()) {
             throw GatewayException.upstreamFailed("embeddings upstream returned an empty body", null);
         }
         List<EmbeddingsResponse.Item> items = new ArrayList<>();
         UsageInfo usage = null;
         switch (vendor) {
             case DASHSCOPE:
-                JsonNode emb = raw.path("output").path("embeddings");
+                JsonCursor emb = raw.path("output").path("embeddings");
                 if (!emb.isArray()) {
                     throw GatewayException.upstreamFailed(
                             "dashscope embeddings response has no output.embeddings", null);
                 }
-                for (JsonNode e : emb) {
+                for (JsonCursor e : emb.elements()) {
                     items.add(new EmbeddingsResponse.Item(
                             e.path("text_index").asInt(items.size()), readVector(e.path("embedding"))));
                 }
@@ -243,27 +247,27 @@ public class EmbeddingService {
                 }
                 break;
             case GEMINI:
-                JsonNode gemini = raw.path("embedding");
+                JsonCursor gemini = raw.path("embedding");
                 if (!gemini.isArray()) {
                     throw GatewayException.upstreamFailed(
                             "gemini embeddings response has no embedding array", null);
                 }
-                for (JsonNode e : gemini) {
+                for (JsonCursor e : gemini.elements()) {
                     items.add(new EmbeddingsResponse.Item(
                             items.size(), readVector(e.path("values"))));
                 }
                 break;
             default:
-                JsonNode data = raw.path("data");
+                JsonCursor data = raw.path("data");
                 if (!data.isArray()) {
                     throw GatewayException.upstreamFailed(
                             "embeddings response has no data array", null);
                 }
-                for (JsonNode e : data) {
+                for (JsonCursor e : data.elements()) {
                     items.add(new EmbeddingsResponse.Item(
                             e.path("index").asInt(items.size()), readVector(e.path("embedding"))));
                 }
-                JsonNode u = raw.path("usage");
+                JsonCursor u = raw.path("usage");
                 if (u.isObject()) {
                     int prompt = u.path("prompt_tokens").asInt(0);
                     int tot = u.path("total_tokens").asInt(prompt);
@@ -285,11 +289,11 @@ public class EmbeddingService {
         return out;
     }
 
-    private static List<Double> readVector(JsonNode arr) {
+    private static List<Double> readVector(JsonCursor arr) {
         List<Double> out = new ArrayList<>();
         if (arr.isArray()) {
-            for (JsonNode n : arr) {
-                out.add(n.asDouble());
+            for (JsonCursor n : arr.elements()) {
+                out.add(n.asDouble(0D));
             }
         }
         return out;
