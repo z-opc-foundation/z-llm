@@ -6,7 +6,6 @@ import java.util.List;
  * POST /v1/embeddings 响应体 — 与 OpenAI 线格式对齐, 这样任意 OpenAI 客户端
  * 把 base_url 指到网关就能直接拿向量.
  */
-@com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
 public class EmbeddingsResponse {
 
     private String object = "list";
@@ -15,7 +14,6 @@ public class EmbeddingsResponse {
 
     private String model;
 
-    @com.fasterxml.jackson.annotation.JsonProperty("usage")
     private UsageInfo usage;
 
     public String getObject() {
@@ -50,7 +48,6 @@ public class EmbeddingsResponse {
         this.usage = usage;
     }
 
-    @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
     public static class Item {
         private String object = "embedding";
         private Integer index;

@@ -1,6 +1,5 @@
 package com.zifang.z.llm.api.dto;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.zifang.util.json.annotation.JsonDeserialize;
 import com.zifang.util.json.annotation.JsonSerialize;
 
@@ -11,19 +10,16 @@ import com.zifang.util.json.annotation.JsonSerialize;
  */
 public class UsageInfo {
 
-    // 本类同时被两套序列化器经手: EmbeddingsResponse 是 Spring MVC 的 ResponseEntity (Jackson 注解仍然活着),
-    // 而 UnifiedResponse / UnifiedStreamChunk 走 JsonUtil。所以两套注解都要留 ——
-    // 只留 Jackson 那份会让 UnifiedResponse 的 usage 退回 camelCase, 只留 JsonUtil 那份会让
-    // /v1/embeddings 对外的 usage 字段退回 camelCase, 两者都是对外契约变更。
-    @JsonProperty("prompt_tokens")
+    // 两套序列化器的夹缝已消除: /v1/embeddings 原本是 MVC 的 ResponseEntity (要 Jackson 注解),
+    // UnifiedResponse / UnifiedStreamChunk 走 JsonUtil (要 z-util 注解), 两边各钉一份才不出错。
+    // 现在 /v1/embeddings 改由 OpenAIController 显式 toJsonExcludingNulls, 与另两条路径同源,
+    // Jackson 那份已成死码, 只留 z-util 这套。
     @JsonSerialize(name = "prompt_tokens")
     @JsonDeserialize(name = "prompt_tokens")
     private Integer promptTokens;
-    @JsonProperty("completion_tokens")
     @JsonSerialize(name = "completion_tokens")
     @JsonDeserialize(name = "completion_tokens")
     private Integer completionTokens;
-    @JsonProperty("total_tokens")
     @JsonSerialize(name = "total_tokens")
     @JsonDeserialize(name = "total_tokens")
     private Integer totalTokens;

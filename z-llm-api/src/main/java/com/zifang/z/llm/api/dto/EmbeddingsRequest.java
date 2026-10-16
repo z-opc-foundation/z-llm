@@ -15,9 +15,14 @@ public class EmbeddingsRequest {
     private String model;
     private Object input;
 
-    @com.fasterxml.jackson.annotation.JsonProperty("dimensions")
     private Integer dimensions;
 
+    // 唯一残留的 Jackson 注解, 且是本仓仅剩的一处: 请求侧走 @RequestBody, 由 Spring MVC 的
+    // 消息转换器隐式反序列化 —— 正是"Jackson 只活在 controller 层"的那一层。
+    // 出站侧(EmbeddingsResponse)已改由 controller 显式 toJsonExcludingNulls, 不再经 Jackson。
+    // 删不掉的原因是它是承重的: EmbeddingService 把这个值原样转发给上游, 而线上客户端
+    // 按 OpenAI 协议发的是下划线 spelling。改成字段改名会连带 getEncoding_format() 这种
+    // 非法访问器名, 得不偿失。
     @com.fasterxml.jackson.annotation.JsonProperty("encoding_format")
     private String encodingFormat;
 

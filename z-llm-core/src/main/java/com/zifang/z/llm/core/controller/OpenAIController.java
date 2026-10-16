@@ -157,14 +157,19 @@ public class OpenAIController {
      */
     @PostMapping(value = "/embeddings", consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<EmbeddingsResponse> embeddings(@RequestBody EmbeddingsRequest body,
-                                                         HttpServletRequest req,
-                                                         HttpServletResponse resp) {
+    public void embeddings(@RequestBody EmbeddingsRequest body,
+                           HttpServletRequest req,
+                           HttpServletResponse resp) throws IOException {
         ApiKey key = AuthorizationExtractor.requireApiKey(req, apiKeyService);
         // 限流时要在这条响应上打 Retry-After, 所以必须把 resp 传进去而不是 null.
         acquireOrThrow(key, resp);
         try {
-            return ResponseEntity.ok(embeddingService.embed(body, key));
+            // 原本靠 DTO 上的类级 @JsonInclude(NON_NULL) + @JsonProperty 交给 MVC 转换器,
+            // DTO 注解清零后改在 controller 显式序列化 —— 与上面 jsonCompletion 同一形状.
+            resp.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            resp.setCharacterEncoding("UTF-8");
+            resp.getWriter().write(JsonUtil.toJsonExcludingNulls(embeddingService.embed(body, key)));
+            resp.getWriter().flush();
         } finally {
             rateLimiter.release(key);
         }
