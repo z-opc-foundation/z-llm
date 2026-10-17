@@ -46,9 +46,43 @@ public class ApiKeyService implements InitializingBean {
         for (ApiKey k : properties.getApiKeys()) {
             if (k.getKey() == null || k.getKey().isEmpty()) continue;
             if (!"active".equalsIgnoreCase(k.getStatus())) continue;
+            if (k.getId() == null || k.getId().isEmpty()) {
+                k.setId(propertyKeyId(k));
+            }
             activeKeys.put(k.getKey(), k);
         }
         log.info("ApiKeyService loaded active keys: {}", activeKeys.size());
+    }
+
+    /**
+     * properties 里定义的 key 没有 id, 而下游全按 id 归桶: RateLimiter 拿 null 去
+     * {@code ConcurrentHashMap.computeIfAbsent} 直接 NPE (请求面表现是 /v1/* 一律 500),
+     * UsageLedger 则静默丢掉整条用量. 补在装载处而不是各调用点各自判空 ——
+     * 「配置文件提供 ApiKey」是本期唯一一条真实路径, 配出来就坏的 key 不该要求使用者知道要补 id.
+     * <p>id 会进限流日志和 admin 输出, 所以取 key 的摘要而非明文; 摘要稳定, 重启后桶不漂移.
+     */
+    static String propertyKeyId(ApiKey k) {
+        StringBuilder sb = new StringBuilder("property:");
+        if (k.getName() != null && !k.getName().isEmpty()) {
+            sb.append(k.getName()).append(':');
+        }
+        return sb.append(digest(k.getKey())).toString();
+    }
+
+    private static String digest(String raw) {
+        byte[] hash;
+        try {
+            hash = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+        StringBuilder sb = new StringBuilder(12);
+        for (int i = 0; i < 6; i++) {
+            sb.append(Character.forDigit((hash[i] >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(hash[i] & 0xF, 16));
+        }
+        return sb.toString();
     }
 
     /**
